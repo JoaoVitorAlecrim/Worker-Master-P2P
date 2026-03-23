@@ -8,7 +8,7 @@ from typing import Dict, Any
 #no segundo terminal digitar python worker.py
 
 HOST = "0.0.0.0"
-PORT = 5000
+PORT = 5001
 SERVER_UUID = "Master_A"
 
 
@@ -88,5 +88,5 @@ def start_server() -> None:
         server.close()
 
 
-if __name__ == "__main__":
+if _name_ == "_main_":
     start_server()

@@ -7,8 +7,8 @@ from typing import Dict, Any
 #para rodar o código basta abrir dois terminais, no primeiro digitar: python master.py
 #no segundo terminal digitar python worker.py
 
-MASTER_HOST = "127.0.0.1"
-MASTER_PORT = 5000
+MASTER_HOST = "192.168.56.1"
+MASTER_PORT = 5001
 SERVER_UUID = "Master_A"
 INTERVALO = 10
 
