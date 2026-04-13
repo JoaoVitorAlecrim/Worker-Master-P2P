@@ -1,4 +1,5 @@
-from typing import Dict, Any
+import time
+from typing import Any, Dict
 
 
 def execute_task(task: Dict[str, Any]) -> Any:
@@ -10,12 +11,11 @@ def execute_task(task: Dict[str, Any]) -> Any:
 
     if operation == "multiplicacao":
         result = 1
-        for v in values:
-            result *= v
+        for value in values:
+            result *= value
         return result
 
     if operation == "sleep":
-        import time
         duration = values[0] if values else 1
         time.sleep(duration)
         return f"slept {duration}s"

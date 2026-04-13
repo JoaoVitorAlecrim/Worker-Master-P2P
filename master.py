@@ -1,92 +1,109 @@
 import socket
 import threading
-from queue import Queue
+from queue import Queue, Empty
 from common.protocol import send_json, recv_json_line
-
-# Pra executar é só abrir um terminal e digitar python worker.py. E depois abrir outro terminal e digitar python master.py. 
-
 
 HOST = "0.0.0.0"
 PORT = 5000
 SERVER_UUID = "Master_A"
+SOCKET_TIMEOUT = 15
 
 
 class MasterServer:
-    def __init__(self):
+    def __init__(self) -> None:
         self.task_queue = Queue()
-
-        # tarefas iniciais
         self.load_tasks()
 
-    def load_tasks(self):
+    def load_tasks(self) -> None:
         tasks = [
             {"operation": "soma", "values": [2, 3]},
             {"operation": "multiplicacao", "values": [4, 5]},
             {"operation": "sleep", "values": [2]},
-            {"operation": "soma", "values": [10, 20]}
+            {"operation": "soma", "values": [10, 20]},
+            {"operation": "multiplicacao", "values": [3, 7]},
         ]
 
         for task in tasks:
             self.task_queue.put(task)
 
-    def handle_client(self, conn, addr):
+    def get_next_task(self):
+        try:
+            return self.task_queue.get_nowait()
+        except Empty:
+            return None
+
+    def handle_client(self, conn: socket.socket, addr) -> None:
         print(f"[MASTER] Worker conectado: {addr}")
 
-        sock_file = conn.makefile("r")
-
         try:
-            while True:
-                data = recv_json_line(sock_file)
+            conn.settimeout(SOCKET_TIMEOUT)
 
-                if data is None:
-                    print(f"[MASTER] Worker desconectado: {addr}")
-                    break
+            with conn:
+                sock_file = conn.makefile("r", encoding="utf-8")
 
-                task_type = data.get("TASK")
+                while True:
+                    data = recv_json_line(sock_file)
 
-                if task_type == "HEARTBEAT":
-                    send_json(conn, {
-                        "SERVER_UUID": SERVER_UUID,
-                        "TASK": "HEARTBEAT",
-                        "RESPONSE": "ALIVE"
-                    })
+                    if data is None:
+                        print(f"[MASTER] Worker desconectado: {addr}")
+                        break
 
-                    # envia tarefa se houver
-                    if not self.task_queue.empty():
-                        task = self.task_queue.get()
+                    task_type = data.get("TASK")
+                    print(f"[MASTER] Recebido de {addr}: {data}")
 
-                        send_json(conn, {
-                            "TASK": "EXECUTE",
-                            "DATA": task
-                        })
+                    if task_type == "HEARTBEAT":
+                        next_task = self.get_next_task()
 
-                        print(f"[MASTER] Enviou tarefa para {addr}: {task}")
+                        response = {
+                            "SERVER_UUID": SERVER_UUID,
+                            "TASK": "HEARTBEAT_ACK",
+                            "RESPONSE": "ALIVE",
+                            "HAS_TASK": next_task is not None,
+                            "DATA": next_task
+                        }
 
-                elif task_type == "RESULT":
-                    print(f"[MASTER] Resultado recebido de {addr}: {data.get('RESULT')}")
+                        send_json(conn, response)
+                        print(f"[MASTER] Enviado para {addr}: {response}")
 
-        except Exception as e:
-            print(f"[MASTER] Erro: {e}")
+                    elif task_type == "RESULT":
+                        print(f"[MASTER] Resultado de {addr}: {data.get('RESULT')}")
 
-        finally:
-            conn.close()
+                    else:
+                        response = {
+                            "SERVER_UUID": SERVER_UUID,
+                            "TASK": "ERROR",
+                            "MESSAGE": "TASK_NAO_SUPORTADA"
+                        }
+                        send_json(conn, response)
 
-    def start(self):
+        except socket.timeout:
+            print(f"[MASTER] Timeout com {addr}")
+        except Exception as exc:
+            print(f"[MASTER] Erro com {addr}: {exc}")
+
+    def start(self) -> None:
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server.bind((HOST, PORT))
         server.listen()
 
         print(f"[MASTER] Rodando em {HOST}:{PORT}")
 
-        while True:
-            conn, addr = server.accept()
+        try:
+            while True:
+                conn, addr = server.accept()
 
-            thread = threading.Thread(
-                target=self.handle_client,
-                args=(conn, addr),
-                daemon=True
-            )
-            thread.start()
+                worker_thread = threading.Thread(
+                    target=self.handle_client,
+                    args=(conn, addr),
+                    daemon=True
+                )
+                worker_thread.start()
+
+        except KeyboardInterrupt:
+            print("\n[MASTER] Encerrado pelo usuário.")
+        finally:
+            server.close()
 
 
 if __name__ == "__main__":

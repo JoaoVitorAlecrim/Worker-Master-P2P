@@ -1,6 +1,6 @@
 import json
 import socket
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
 
 
 def send_json(sock: socket.socket, data: Dict[str, Any]) -> None:
@@ -14,7 +14,12 @@ def recv_json_line(sock_file) -> Optional[Dict[str, Any]]:
     if not line:
         return None
 
+    line = line.strip()
+
+    if not line:
+        return None
+
     try:
-        return json.loads(line.strip())
+        return json.loads(line)
     except json.JSONDecodeError:
-        return {"ERROR": "JSON_INVALIDO"}
+        return {"TASK": "ERROR", "MESSAGE": "JSON_INVALIDO"}

@@ -3,63 +3,77 @@ import time
 from common.protocol import send_json, recv_json_line
 from common.tasks import execute_task
 
-# Pra executar é só abrir um terminal e digitar python worker.py. E depois abrir outro terminal e digitar python master.py. 
-
 MASTER_HOST = "127.0.0.1"
 MASTER_PORT = 5000
 WORKER_ID = "Worker_1"
 
-INTERVAL = 5
+HEARTBEAT_INTERVAL = 5
 RECONNECT_DELAY = 3
+SOCKET_TIMEOUT = 15
 
 
 class WorkerClient:
-    def run(self):
+    def run(self) -> None:
         while True:
             try:
-                print(f"[{WORKER_ID}] Conectando ao Master...")
+                print(f"[{WORKER_ID}] Tentando conectar ao Master...")
 
-                with socket.create_connection((MASTER_HOST, MASTER_PORT)) as sock:
-                    sock_file = sock.makefile("r")
+                with socket.create_connection((MASTER_HOST, MASTER_PORT), timeout=10) as sock:
+                    sock.settimeout(SOCKET_TIMEOUT)
+                    sock_file = sock.makefile("r", encoding="utf-8")
 
-                    print(f"[{WORKER_ID}] Conectado!")
+                    print(f"[{WORKER_ID}] Conectado ao Master.")
 
                     while True:
-                        # heartbeat
-                        send_json(sock, {
+                        heartbeat = {
                             "WORKER_ID": WORKER_ID,
                             "TASK": "HEARTBEAT"
-                        })
+                        }
+
+                        send_json(sock, heartbeat)
+                        print(f"[{WORKER_ID}] Heartbeat enviado.")
 
                         response = recv_json_line(sock_file)
 
                         if response is None:
+                            print(f"[{WORKER_ID}] Conexão encerrada pelo Master.")
                             break
 
-                        if response.get("TASK") == "HEARTBEAT":
-                            print(f"[{WORKER_ID}] ALIVE")
+                        print(f"[{WORKER_ID}] Resposta recebida: {response}")
 
-                        # verifica se chegou tarefa
-                        next_msg = recv_json_line(sock_file)
+                        if response.get("TASK") == "HEARTBEAT_ACK":
+                            if response.get("RESPONSE") == "ALIVE":
+                                print(f"[{WORKER_ID}] Master está ALIVE.")
 
-                        if next_msg and next_msg.get("TASK") == "EXECUTE":
-                            task = next_msg.get("DATA")
-                            print(f"[{WORKER_ID}] Executando: {task}")
+                            if response.get("HAS_TASK"):
+                                task = response.get("DATA")
+                                print(f"[{WORKER_ID}] Executando tarefa: {task}")
 
-                            result = execute_task(task)
+                                result = execute_task(task)
 
-                            send_json(sock, {
-                                "TASK": "RESULT",
-                                "RESULT": result
-                            })
+                                result_message = {
+                                    "WORKER_ID": WORKER_ID,
+                                    "TASK": "RESULT",
+                                    "RESULT": result
+                                }
 
-                            print(f"[{WORKER_ID}] Resultado enviado: {result}")
+                                send_json(sock, result_message)
+                                print(f"[{WORKER_ID}] Resultado enviado: {result}")
 
-                        time.sleep(INTERVAL)
+                        elif response.get("TASK") == "ERROR":
+                            print(f"[{WORKER_ID}] Erro recebido: {response.get('MESSAGE')}")
 
-            except Exception as e:
-                print(f"[{WORKER_ID}] OFFLINE: {e}")
+                        time.sleep(HEARTBEAT_INTERVAL)
+
+            except socket.timeout:
+                print(f"[{WORKER_ID}] Timeout de conexão/comunicação. Reconectando...")
                 time.sleep(RECONNECT_DELAY)
+            except (ConnectionRefusedError, OSError) as exc:
+                print(f"[{WORKER_ID}] Master indisponível: {exc}")
+                time.sleep(RECONNECT_DELAY)
+            except KeyboardInterrupt:
+                print(f"\n[{WORKER_ID}] Encerrado pelo usuário.")
+                break
 
 
 if __name__ == "__main__":
