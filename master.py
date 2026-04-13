@@ -1,92 +1,93 @@
-import json
 import socket
 import threading
-from typing import Dict, Any
+from queue import Queue
+from common.protocol import send_json, recv_json_line
 
-#Grupo João Vitor de Morais, Bryan Barros e Pedro Vinicius
-#para rodar o código basta abrir dois terminais, no primeiro digitar: python master.py
-#no segundo terminal digitar python worker.py
+# Pra executar é só abrir um terminal e digitar python worker.py. E depois abrir outro terminal e digitar python master.py. 
+
 
 HOST = "0.0.0.0"
-PORT = 5001
+PORT = 5000
 SERVER_UUID = "Master_A"
 
 
-def send_json(conn: socket.socket, data: Dict[str, Any]) -> None:
-    message = json.dumps(data) + "\n"
-    conn.sendall(message.encode("utf-8"))
+class MasterServer:
+    def __init__(self):
+        self.task_queue = Queue()
 
+        # tarefas iniciais
+        self.load_tasks()
 
-def recv_json_line(conn_file) -> Dict[str, Any] | None:
-    line = conn_file.readline()
-    if not line:
-        return None
+    def load_tasks(self):
+        tasks = [
+            {"operation": "soma", "values": [2, 3]},
+            {"operation": "multiplicacao", "values": [4, 5]},
+            {"operation": "sleep", "values": [2]},
+            {"operation": "soma", "values": [10, 20]}
+        ]
 
-    line = line.strip()
-    if not line:
-        return None
+        for task in tasks:
+            self.task_queue.put(task)
 
-    try:
-        return json.loads(line)
-    except json.JSONDecodeError:
-        return {"ERROR": "JSON_INVALIDO"}
+    def handle_client(self, conn, addr):
+        print(f"[MASTER] Worker conectado: {addr}")
 
+        sock_file = conn.makefile("r")
 
-def handle_client(conn: socket.socket, addr) -> None:
-    print(f"[NOVA CONEXÃO] {addr}")
-
-    try:
-        with conn:
-            conn_file = conn.makefile("r", encoding="utf-8")
-
+        try:
             while True:
-                data = recv_json_line(conn_file)
+                data = recv_json_line(sock_file)
 
                 if data is None:
-                    print(f"[DESCONECTADO] {addr}")
+                    print(f"[MASTER] Worker desconectado: {addr}")
                     break
 
-                print(f"[RECEBIDO DE {addr}] {data}")
+                task_type = data.get("TASK")
 
-                if data.get("TASK") == "HEARTBEAT":
-                    response = {
+                if task_type == "HEARTBEAT":
+                    send_json(conn, {
                         "SERVER_UUID": SERVER_UUID,
                         "TASK": "HEARTBEAT",
                         "RESPONSE": "ALIVE"
-                    }
-                    send_json(conn, response)
-                    print(f"[ENVIADO PARA {addr}] {response}")
-                else:
-                    response = {
-                        "SERVER_UUID": SERVER_UUID,
-                        "TASK": data.get("TASK", "UNKNOWN"),
-                        "RESPONSE": "UNSUPPORTED_TASK"
-                    }
-                    send_json(conn, response)
-                    print(f"[ENVIADO PARA {addr}] {response}")
+                    })
 
-    except Exception as e:
-        print(f"[ERRO {addr}] {e}")
+                    # envia tarefa se houver
+                    if not self.task_queue.empty():
+                        task = self.task_queue.get()
 
+                        send_json(conn, {
+                            "TASK": "EXECUTE",
+                            "DATA": task
+                        })
 
-def start_server() -> None:
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind((HOST, PORT))
-    server.listen()
+                        print(f"[MASTER] Enviou tarefa para {addr}: {task}")
 
-    print(f"[MASTER ATIVO] {SERVER_UUID} escutando em {HOST}:{PORT}")
+                elif task_type == "RESULT":
+                    print(f"[MASTER] Resultado recebido de {addr}: {data.get('RESULT')}")
 
-    try:
+        except Exception as e:
+            print(f"[MASTER] Erro: {e}")
+
+        finally:
+            conn.close()
+
+    def start(self):
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.bind((HOST, PORT))
+        server.listen()
+
+        print(f"[MASTER] Rodando em {HOST}:{PORT}")
+
         while True:
             conn, addr = server.accept()
-            thread = threading.Thread(target=handle_client, args=(conn, addr), daemon=True)
+
+            thread = threading.Thread(
+                target=self.handle_client,
+                args=(conn, addr),
+                daemon=True
+            )
             thread.start()
-    except KeyboardInterrupt:
-        print("\n[ENCERRANDO SERVIDOR]")
-    finally:
-        server.close()
 
 
-if _name_ == "_main_":
-    start_server()
+if __name__ == "__main__":
+    MasterServer().start()

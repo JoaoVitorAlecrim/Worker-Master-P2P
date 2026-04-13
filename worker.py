@@ -1,77 +1,66 @@
-import json
 import socket
 import time
-from typing import Dict, Any
+from common.protocol import send_json, recv_json_line
+from common.tasks import execute_task
 
-#Grupo João Vitor de Morais, Bryan Barros e Pedro Vinicius
-#para rodar o código basta abrir dois terminais, no primeiro digitar: python master.py
-#no segundo terminal digitar python worker.py
+# Pra executar é só abrir um terminal e digitar python worker.py. E depois abrir outro terminal e digitar python master.py. 
 
-MASTER_HOST = "192.168.56.1"
-MASTER_PORT = 5001
-SERVER_UUID = "Master_A"
-INTERVALO = 10
+MASTER_HOST = "127.0.0.1"
+MASTER_PORT = 5000
+WORKER_ID = "Worker_1"
 
-
-def send_json(sock: socket.socket, data: Dict[str, Any]) -> None:
-    message = json.dumps(data) + "\n"
-    sock.sendall(message.encode("utf-8"))
+INTERVAL = 5
+RECONNECT_DELAY = 3
 
 
-def recv_json_line(sock_file) -> Dict[str, Any] | None:
-    line = sock_file.readline()
-    if not line:
-        return None
+class WorkerClient:
+    def run(self):
+        while True:
+            try:
+                print(f"[{WORKER_ID}] Conectando ao Master...")
 
-    line = line.strip()
-    if not line:
-        return None
+                with socket.create_connection((MASTER_HOST, MASTER_PORT)) as sock:
+                    sock_file = sock.makefile("r")
 
-    try:
-        return json.loads(line)
-    except json.JSONDecodeError:
-        return {"ERROR": "JSON_INVALIDO"}
+                    print(f"[{WORKER_ID}] Conectado!")
 
+                    while True:
+                        # heartbeat
+                        send_json(sock, {
+                            "WORKER_ID": WORKER_ID,
+                            "TASK": "HEARTBEAT"
+                        })
 
-def heartbeat_loop() -> None:
-    while True:
-        try:
-            print("[WORKER] Tentando conectar ao Master...")
+                        response = recv_json_line(sock_file)
 
-            with socket.create_connection((MASTER_HOST, MASTER_PORT), timeout=5) as sock:
-                sock.settimeout(None)
-                sock_file = sock.makefile("r", encoding="utf-8")
-                print("[WORKER] Conectado ao Master.")
+                        if response is None:
+                            break
 
-                while True:
-                    payload = {
-                        "SERVER_UUID": SERVER_UUID,
-                        "TASK": "HEARTBEAT"
-                    }
+                        if response.get("TASK") == "HEARTBEAT":
+                            print(f"[{WORKER_ID}] ALIVE")
 
-                    send_json(sock, payload)
-                    print(f"[WORKER] Enviado: {payload}")
+                        # verifica se chegou tarefa
+                        next_msg = recv_json_line(sock_file)
 
-                    response = recv_json_line(sock_file)
+                        if next_msg and next_msg.get("TASK") == "EXECUTE":
+                            task = next_msg.get("DATA")
+                            print(f"[{WORKER_ID}] Executando: {task}")
 
-                    if response is None:
-                        print("[WORKER] Conexão encerrada pelo Master.")
-                        break
+                            result = execute_task(task)
 
-                    if response.get("RESPONSE") == "ALIVE":
-                        print('[WORKER] Status: ALIVE')
-                    else:
-                        print(f"[WORKER] Resposta inesperada: {response}")
+                            send_json(sock, {
+                                "TASK": "RESULT",
+                                "RESULT": result
+                            })
 
-                    time.sleep(INTERVALO)
+                            print(f"[{WORKER_ID}] Resultado enviado: {result}")
 
-        except (ConnectionRefusedError, socket.timeout, OSError) as e:
-            print(f"[WORKER] Status: OFFLINE - Tentando reconectar. Motivo: {e}")
-            time.sleep(5)
-        except KeyboardInterrupt:
-            print("\n[WORKER] Encerrado.")
-            break
+                        time.sleep(INTERVAL)
+
+            except Exception as e:
+                print(f"[{WORKER_ID}] OFFLINE: {e}")
+                time.sleep(RECONNECT_DELAY)
 
 
 if __name__ == "__main__":
-    heartbeat_loop()
+    WorkerClient().run()
