@@ -22,4 +22,7 @@ def recv_json_line(sock_file) -> Optional[Dict[str, Any]]:
     try:
         return json.loads(line)
     except json.JSONDecodeError:
-        return {"TASK": "ERROR", "MESSAGE": "JSON_INVALIDO"}
+        return {
+            "TASK": "ERROR",
+            "MESSAGE": "JSON_INVALIDO"
+        }

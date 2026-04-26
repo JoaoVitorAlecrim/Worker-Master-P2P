@@ -1,16 +1,17 @@
 import socket
 import threading
 from queue import Queue, Empty
-from common.protocol import send_json, recv_json_line
 
-HOST = "0.0.0.0"
-PORT = 5000
-SERVER_UUID = "Master_A"
-SOCKET_TIMEOUT = 15
+from common.protocol import send_json, recv_json_line
+from config import MASTER_PORT, SOCKET_TIMEOUT
 
 
 class MasterServer:
-    def __init__(self) -> None:
+    def __init__(self, host: str = "0.0.0.0", port: int = MASTER_PORT, server_id: str = "Master_A") -> None:
+        self.host = host
+        self.port = port
+        self.server_id = server_id
+        self.running = False
         self.task_queue = Queue()
         self.load_tasks()
 
@@ -33,7 +34,7 @@ class MasterServer:
             return None
 
     def handle_client(self, conn: socket.socket, addr) -> None:
-        print(f"[MASTER] Worker conectado: {addr}")
+        print(f"[{self.server_id}] Worker conectado: {addr}")
 
         try:
             conn.settimeout(SOCKET_TIMEOUT)
@@ -41,21 +42,22 @@ class MasterServer:
             with conn:
                 sock_file = conn.makefile("r", encoding="utf-8")
 
-                while True:
+                while self.running:
                     data = recv_json_line(sock_file)
 
                     if data is None:
-                        print(f"[MASTER] Worker desconectado: {addr}")
+                        print(f"[{self.server_id}] Worker desconectado: {addr}")
                         break
 
+                    print(f"[{self.server_id}] Recebido de {addr}: {data}")
+
                     task_type = data.get("TASK")
-                    print(f"[MASTER] Recebido de {addr}: {data}")
 
                     if task_type == "HEARTBEAT":
                         next_task = self.get_next_task()
 
                         response = {
-                            "SERVER_UUID": SERVER_UUID,
+                            "SERVER_ID": self.server_id,
                             "TASK": "HEARTBEAT_ACK",
                             "RESPONSE": "ALIVE",
                             "HAS_TASK": next_task is not None,
@@ -63,48 +65,57 @@ class MasterServer:
                         }
 
                         send_json(conn, response)
-                        print(f"[MASTER] Enviado para {addr}: {response}")
+                        print(f"[{self.server_id}] Enviado para {addr}: {response}")
 
                     elif task_type == "RESULT":
-                        print(f"[MASTER] Resultado de {addr}: {data.get('RESULT')}")
+                        print(f"[{self.server_id}] Resultado recebido de {data.get('WORKER_ID')}: {data.get('RESULT')}")
 
                     else:
-                        response = {
-                            "SERVER_UUID": SERVER_UUID,
+                        send_json(conn, {
+                            "SERVER_ID": self.server_id,
                             "TASK": "ERROR",
                             "MESSAGE": "TASK_NAO_SUPORTADA"
-                        }
-                        send_json(conn, response)
+                        })
 
         except socket.timeout:
-            print(f"[MASTER] Timeout com {addr}")
+            print(f"[{self.server_id}] Timeout com {addr}")
         except Exception as exc:
-            print(f"[MASTER] Erro com {addr}: {exc}")
+            print(f"[{self.server_id}] Erro com {addr}: {exc}")
 
     def start(self) -> None:
+        self.running = True
+
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server.bind((HOST, PORT))
+        server.bind((self.host, self.port))
         server.listen()
 
-        print(f"[MASTER] Rodando em {HOST}:{PORT}")
+        print(f"[{self.server_id}] Rodando em {self.host}:{self.port}")
 
         try:
-            while True:
+            while self.running:
                 conn, addr = server.accept()
 
-                worker_thread = threading.Thread(
+                thread = threading.Thread(
                     target=self.handle_client,
                     args=(conn, addr),
                     daemon=True
                 )
-                worker_thread.start()
+                thread.start()
 
         except KeyboardInterrupt:
-            print("\n[MASTER] Encerrado pelo usuário.")
+            print(f"\n[{self.server_id}] Encerrado pelo usuário.")
+        except Exception as exc:
+            print(f"[{self.server_id}] Erro no servidor: {exc}")
         finally:
+            self.running = False
             server.close()
 
 
 if __name__ == "__main__":
-    MasterServer().start()
+    master = MasterServer(
+        host="0.0.0.0",
+        port=MASTER_PORT,
+        server_id="Master_A"
+    )
+    master.start()
