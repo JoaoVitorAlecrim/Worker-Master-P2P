@@ -15,13 +15,15 @@ class MasterServer:
         self.load_tasks()
 
     def load_tasks(self) -> None:
-        tasks = [
-            {"operation": "soma", "values": [2, 3]},
-            {"operation": "multiplicacao", "values": [4, 5]},
-            {"operation": "sleep", "values": [2]},
-            {"operation": "soma", "values": [10, 20]},
-            {"operation": "multiplicacao", "values": [3, 7]},
-        ]
+        tasks = []
+
+        for i in range(60):
+            if i % 3 == 0:
+                tasks.append({"operation": "soma", "values": [i + 1, i + 2]})
+            elif i % 3 == 1:
+                tasks.append({"operation": "multiplicacao", "values": [i + 2, i + 3]})
+            else:
+                tasks.append({"operation": "sleep", "values": [1]})
 
         for task in tasks:
             self.task_queue.put(task)
