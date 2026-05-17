@@ -7,9 +7,11 @@ def execute_task(task: Dict[str, Any]) -> Any:
     values = task.get("values", [])
 
     if operation == "soma":
+        time.sleep(1)
         return sum(values)
 
     if operation == "multiplicacao":
+        time.sleep(1)
         result = 1
         for value in values:
             result *= value
