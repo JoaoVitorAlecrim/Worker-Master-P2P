@@ -10,6 +10,8 @@ import sys
 import threading
 import os
 import shutil
+import hashlib
+from typing import Optional
 from common.protocol import send_json, recv_json_line
 from common.tasks import execute_task
 
@@ -52,6 +54,9 @@ class WorkerClient:
         self.failback_requested = False
         self.failback_target = None
         self.failback_detected_at = None
+        self.election_started_at = None
+        self.election_pending_winner = None
+        self.election_settle_seconds = float(os.getenv("ELECTION_SETTLE_SECONDS", "1.5"))
         self.failback_grace_seconds = int(os.getenv("FAILBACK_GRACE_SECONDS", "5"))
 
     def get_free_disk_bytes(self) -> int:
@@ -119,14 +124,99 @@ class WorkerClient:
         candidates.sort(key=lambda item: (-item["FREE_DISK_BYTES"], item["WORKER_UUID"]))
         return candidates[0]
 
-    def start_promoted_master(self) -> None:
+    def has_peer_candidates(self) -> bool:
+        """Indica se há pelo menos um outro worker conhecido para a eleição."""
+        for worker_uuid, info in self.peer_registry.items():
+            if worker_uuid == self.worker_uuid:
+                continue
+            if info.get("HOST"):
+                return True
+        return False
+
+    def announce_election_leader(self, response: dict) -> None:
+        """Atualiza o master alvo quando um líder de eleição é anunciado na rede."""
+        election = response.get("ELECTION")
+        if not isinstance(election, dict):
+            return
+
+        leader_uuid = election.get("LEADER_UUID")
+        leader_host = election.get("LEADER_HOST")
+        leader_port = election.get("LEADER_PORT")
+        leader_server_uuid = election.get("LEADER_SERVER_UUID") or election.get("SOURCE_SERVER_UUID")
+
+        if not leader_uuid or leader_uuid == self.worker_uuid:
+            return
+
+        if leader_host:
+            self.master_host = leader_host
+
+        if leader_port is not None:
+            try:
+                self.master_port = int(leader_port)
+            except Exception:
+                pass
+
+        if leader_server_uuid:
+            self.server_uuid = leader_server_uuid
+
+        self.master_failure_count = 0
+        self.election_started_at = None
+        self.election_pending_winner = None
+
+        logger.info(
+            f"↪ Líder da eleição anunciado na rede: {leader_uuid} "
+            f"({self.master_host}:{self.master_port})"
+        )
+
+    def _election_backoff_delay(self) -> float:
+        """Calcula um atraso curto e estável para evitar promoção simultânea."""
+        digest = hashlib.sha1(self.worker_uuid.encode("utf-8")).hexdigest()
+        # spread up to ~1s to reduce collision window
+        return (int(digest[:8], 16) % 1000) / 1000.0
+
+    def start_promoted_master(self, leader_host: Optional[str] = None) -> None:
         """Sobe um Master local usando o server_uuid original."""
         from master import MasterServer
+
+        # Election lock: try to bind a deterministic port so only one process can promote
+        try:
+            base_port = int(os.getenv('MASTER_PORT', str(self.master_port)))
+        except Exception:
+            base_port = int(self.master_port)
+
+        election_lock_port = base_port + 10000
+        lock_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            lock_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
+            lock_sock.bind(('127.0.0.1', election_lock_port))
+            # keep the socket open to hold the lock
+            lock_sock.listen(1)
+        except Exception as exc:
+            try:
+                lock_sock.close()
+            except:
+                pass
+            logger.info(f"Election lock unavailable on port {election_lock_port}; another node likely promoted. Adotando líder.")
+            # Adopt the pending winner if known
+            if self.election_pending_winner:
+                w = self.election_pending_winner
+                self.master_host = w.get('HOST') or self.master_host
+                self.master_port = int(os.getenv('MASTER_PORT', str(self.master_port)))
+            return
 
         promoted_server_uuid = self.server_uuid
         server = MasterServer(server_uuid=promoted_server_uuid)
         server.task_manager.set_persistence(promoted_server_uuid)
         server.failback_target = None
+        leader_host = leader_host or self.peer_registry.get(self.worker_uuid, {}).get("HOST") or self.master_host
+        server.election_leader_info = {
+            "LEADER_UUID": self.worker_uuid,
+            "LEADER_HOST": leader_host,
+            "LEADER_PORT": self.master_port,
+            "LEADER_SERVER_UUID": promoted_server_uuid,
+        }
+        # attach lock socket so it remains open while master runs
+        server.election_lock_socket = lock_sock
         self.promoted_server = server
 
         # Não pode ser daemon: o processo precisa continuar vivo como novo master.
@@ -219,6 +309,8 @@ class WorkerClient:
         winner = self.choose_election_winner()
         winner_uuid = winner.get("WORKER_UUID")
         winner_host = winner.get("HOST") or self.master_host
+        self.election_pending_winner = winner
+        settle_seconds = self.election_settle_seconds + self._election_backoff_delay()
 
         logger.warning(
             f"Eleição disparada após {self.master_failure_count} falhas. "
@@ -226,13 +318,48 @@ class WorkerClient:
         )
 
         if winner_uuid == self.worker_uuid:
-            self.start_promoted_master()
-            self.mode = "master"
-            return True
+            # start/continue election settle window
+            if self.election_started_at is None:
+                self.election_started_at = time.time()
+                logger.warning(
+                    f"Líder local detectado; aguardando {settle_seconds:.1f}s "
+                    "para consenso na rede antes de promover..."
+                )
+                return False
+
+            elapsed = time.time() - self.election_started_at
+            if elapsed < settle_seconds:
+                logger.info(
+                    f"Aguardando confirmação da eleição ({elapsed:.1f}/"
+                    f"{settle_seconds:.1f}s)..."
+                )
+                return False
+
+            # Antes de promover, checar se outro master já subiu no alvo
+            try:
+                test_sock = socket.create_connection((winner_host, self.master_port), timeout=0.8)
+                try:
+                    test_sock.close()
+                except:
+                    pass
+                # Encontrou um master ativo — adota líder
+                logger.info(f"Detecção: master já ativo em {winner_host}:{self.master_port}, adotando líder {winner_uuid}")
+                self.master_host = winner_host
+                self.master_port = int(os.getenv("MASTER_PORT", str(self.master_port)))
+                self.master_failure_count = 0
+                self.election_started_at = None
+                self.election_pending_winner = None
+                return False
+            except Exception:
+                # Nenhum master detectado — promover
+                self.start_promoted_master(leader_host=winner_host)
+                self.mode = "master"
+                return True
 
         self.master_host = winner_host
         self.master_port = int(os.getenv("MASTER_PORT", str(self.master_port)))
         self.master_failure_count = 0
+        self.election_started_at = None
         logger.info(f"↪ Reapontando conexão para o novo master {winner_uuid} em {self.master_host}:{self.master_port}")
         return False
     
@@ -271,6 +398,8 @@ class WorkerClient:
             if response is None:
                 logger.debug("Conexão encerrada pelo Master")
                 return False
+
+            self.announce_election_leader(response)
             
             # Aceita qualquer resposta TASK válida
             task_type = response.get("TASK")
@@ -316,6 +445,8 @@ class WorkerClient:
             if response is None:
                 logger.warning("Conexão encerrada pelo Master")
                 return None
+
+            self.announce_election_leader(response)
             
             task_type = response.get("TASK")
             
@@ -438,6 +569,7 @@ class WorkerClient:
             response = recv_json_line(sock_file)
             
             if response and response.get("STATUS") == "ACK":
+                self.announce_election_leader(response)
                 return True
             
             logger.debug(f"ACK não recebido: {response}")

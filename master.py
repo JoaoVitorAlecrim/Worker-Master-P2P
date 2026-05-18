@@ -29,6 +29,7 @@ CAPACITY = 100  # Número máximo de tarefas pendentes
 # Lista de masters pares (lab config). Pode ser passada via env MASTER_PEERS como
 # "host:port:uuid,host2:port2:uuid2"
 PEER_MASTERS = []
+logger = logging.getLogger(__name__)
 peers_env = os.getenv("MASTER_PEERS")
 if peers_env:
     for part in peers_env.split(','):
@@ -56,6 +57,7 @@ class MasterServer:
         self.lock = threading.RLock()
         self.running = True
         self.failback_target = None
+        self.election_leader_info = None
     
     # ============ INICIALIZAÇÃO ============
     
@@ -72,6 +74,13 @@ class MasterServer:
                 self.task_manager.create_task("sleep", [1])
         
         logger.info(f"✓ {num_tasks} tarefas carregadas")
+
+    def _attach_election_info(self, response: dict) -> dict:
+        """Anexa informação de líder eleito quando este master foi promovido."""
+        if self.election_leader_info:
+            response = dict(response)
+            response["ELECTION"] = dict(self.election_leader_info)
+        return response
     
     # ============ PROTOCOLO - APRESENTAÇÃO (ALIVE) ============
     
@@ -114,15 +123,15 @@ class MasterServer:
         logger.info(f"✓ Worker {worker_uuid} conectado")
 
         if self.failback_target:
-            return self._build_failback_redirect()
+            return self._attach_election_info(self._build_failback_redirect())
         
         # Responder com HEARTBEAT ALIVE
-        return {
+        return self._attach_election_info({
             "SERVER_UUID": self.server_uuid,
             "TASK": "HEARTBEAT",
             "RESPONSE": "ALIVE",
             "WORKERS": self.task_manager.get_online_worker_snapshot(),
-        }
+        })
     
     # ============ PROTOCOLO - DISTRIBUIÇÃO DE TAREFAS ============
     
@@ -149,7 +158,7 @@ class MasterServer:
         self.task_manager.update_worker_heartbeat(worker_uuid)
 
         if self.failback_target:
-            return self._build_failback_redirect()
+            return self._attach_election_info(self._build_failback_redirect())
 
         # Obter próxima tarefa
         task_id = self.task_manager.get_pending_task()
@@ -168,32 +177,32 @@ class MasterServer:
 
                 if resp and resp.get("MASTER") == "RESPONSE_HELP" and resp.get("ACCEPT"):
                     logger.debug(f"Redirecionando para {peer_uuid}")
-                    return {
+                    return self._attach_election_info({
                         "TASK": "REDIRECT",
                         "TARGET_HOST": peer_host,
                         "TARGET_PORT": peer_port,
                         "TARGET_SERVER_UUID": peer_uuid,
                         "WORKERS": self.task_manager.get_online_worker_snapshot(),
-                    }
+                    })
 
-            return {"TASK": "NO_TASK", "WORKERS": self.task_manager.get_online_worker_snapshot()}
+            return self._attach_election_info({"TASK": "NO_TASK", "WORKERS": self.task_manager.get_online_worker_snapshot()})
         
         # Atribuir tarefa ao worker
         task = self.task_manager.get_task(task_id)
         if not task:
-            return {"TASK": "NO_TASK", "WORKERS": self.task_manager.get_online_worker_snapshot()}
+            return self._attach_election_info({"TASK": "NO_TASK", "WORKERS": self.task_manager.get_online_worker_snapshot()})
         
         self.task_manager.assign_task(task_id, worker_uuid)
         logger.info(f"➔ {task.operation} atribuída a {worker_uuid}")
         
         # Enviar tarefa
-        return {
+        return self._attach_election_info({
             "TASK": "QUERY",
             "TASK_ID": task_id,
             "OPERATION": task.operation,
             "VALUES": task.values,
             "WORKERS": self.task_manager.get_online_worker_snapshot(),
-        }
+        })
 
     def _build_failback_redirect(self) -> dict:
         """Constrói resposta de redirecionamento para o master original quando ele retornar."""
@@ -201,13 +210,13 @@ class MasterServer:
         target_port = self.failback_target.get("TARGET_PORT")
         target_server = self.failback_target.get("TARGET_SERVER_UUID")
 
-        return {
+        return self._attach_election_info({
             "TASK": "REDIRECT",
             "TARGET_HOST": target_host,
             "TARGET_PORT": target_port,
             "TARGET_SERVER_UUID": target_server,
             "WORKERS": self.task_manager.get_online_worker_snapshot(),
-        }
+        })
     
     # ============ PROTOCOLO - REPORTE DE STATUS ============
     
@@ -255,11 +264,11 @@ class MasterServer:
             logger.warning(f"✗ {task_id[:8]} falhou: {error_msg}")
         
         # Responder com ACK
-        return {
+        return self._attach_election_info({
             "STATUS": "ACK",
             "TASK_ID": task_id,
             "WORKER_UUID": worker_uuid
-        }
+        })
 
     # ============ PROTOCOLO - MASTER-TO-MASTER ============
 
