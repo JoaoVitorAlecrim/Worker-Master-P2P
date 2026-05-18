@@ -19,6 +19,7 @@ import os
 # Configuração (podem ser sobrescritas via env para testes)
 HOST = os.getenv("MASTER_HOST", "0.0.0.0")
 PORT = int(os.getenv("MASTER_PORT", "5000"))
+MASTER_PEER_PORT = int(os.getenv("MASTER_PEER_PORT", os.getenv("MASTER_PORT", "5000")))
 SERVER_UUID = os.getenv("SERVER_UUID", "Master_A")
 MASTER_AUTH_TOKEN = os.getenv("MASTER_AUTH_TOKEN")
 SOCKET_TIMEOUT = 15
@@ -26,6 +27,7 @@ HEARTBEAT_TIMEOUT = 15  # Segundos até considerar worker offline
 TASK_TIMEOUT = 30  # Segundos até considerar tarefa expirada
 WORKER_CHECK_INTERVAL = 5  # Segundos entre checks de workers
 CAPACITY = 100  # Número máximo de tarefas pendentes
+FAILBACK_GRACE_SECONDS = int(os.getenv("FAILBACK_GRACE_SECONDS", "5"))
 # Lista de masters pares (lab config). Pode ser passada via env MASTER_PEERS como
 # "host:port:uuid,host2:port2:uuid2"
 PEER_MASTERS = []
@@ -34,7 +36,16 @@ peers_env = os.getenv("MASTER_PEERS")
 if peers_env:
     for part in peers_env.split(','):
         try:
-            h, p, u = part.split(':')
+            parts = part.split(':')
+            if len(parts) == 3:
+                h, p, u = parts
+                p = int(p)
+            elif len(parts) == 2:
+                h, u = parts
+                p = MASTER_PEER_PORT
+            else:
+                raise ValueError("Formato incorreto")
+
             PEER_MASTERS.append((h, int(p), u))
         except Exception:
             logger.warning(f"MASTER_PEERS inválido: {part}")
@@ -57,6 +68,7 @@ class MasterServer:
         self.lock = threading.RLock()
         self.running = True
         self.failback_target = None
+        self.failback_initiated_at = None
         self.election_leader_info = None
     
     # ============ INICIALIZAÇÃO ============
@@ -473,6 +485,24 @@ class MasterServer:
                         if worker.status != WorkerStatus.OFFLINE:
                             logger.warning(f"⚠ Worker {worker.worker_uuid} offline (sem heartbeat)")
                             self._handle_worker_disconnect(worker.worker_uuid)
+
+                # Se um failback target foi definido (master original voltou), iniciar contagem regressiva
+                if self.failback_target:
+                    if self.failback_initiated_at is None:
+                        self.failback_initiated_at = time.time()
+                        logger.info(f"Failback iniciado; encerrarei este master em {FAILBACK_GRACE_SECONDS}s se os workers forem redirecionados")
+                    else:
+                        elapsed = time.time() - self.failback_initiated_at
+                        if elapsed >= FAILBACK_GRACE_SECONDS:
+                            logger.info("Failback grace elapsed — encerrando master promovido para permitir retorno do master original")
+                            # salvar estado antes de desligar
+                            try:
+                                if self.server_uuid:
+                                    self.task_manager.save_state(self.server_uuid)
+                            except Exception:
+                                pass
+                            self.running = False
+                            break
                 
                 # Estatísticas
                 stats = self.task_manager.get_statistics()

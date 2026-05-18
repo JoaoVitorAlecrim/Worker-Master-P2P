@@ -16,10 +16,10 @@ from common.protocol import send_json, recv_json_line
 from common.tasks import execute_task
 
 # Configuração
-MASTER_HOST = os.getenv("MASTER_HOST", "127.0.0.1")
+MASTER_HOST = os.getenv("MASTER_HOST", "10.62.217.24")
 MASTER_PORT = int(os.getenv("MASTER_PORT", "5000"))
 WORKER_UUID = "Worker_1"  # Alterado de WORKER_ID para WORKER_UUID
-SERVER_UUID = "Master_A"  # Master ao qual pertence originalmente
+SERVER_UUID = "Master_2"  # Master ao qual pertence originalmente
 
 HEARTBEAT_INTERVAL = int(os.getenv("HEARTBEAT_INTERVAL", "10"))
 RECONNECT_DELAY = int(os.getenv("RECONNECT_DELAY", "3"))
@@ -227,10 +227,19 @@ class WorkerClient:
 
         peers_env = os.getenv('MASTER_PEERS')
         if peers_env:
+            # allow entries in two formats: host:port:uuid or host:uuid (uses MASTER_PEER_PORT)
+            default_peer_port = int(os.getenv('MASTER_PEER_PORT', os.getenv('MASTER_PORT', str(self.master_port))))
             for part in peers_env.split(','):
                 try:
-                    h, p, u = part.split(':')
-                    p = int(p)
+                    parts = part.split(':')
+                    if len(parts) == 3:
+                        h, p, u = parts
+                        p = int(p)
+                    elif len(parts) == 2:
+                        h, u = parts
+                        p = int(default_peer_port)
+                    else:
+                        continue
                 except Exception:
                     continue
 
