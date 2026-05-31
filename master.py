@@ -912,12 +912,8 @@ class MasterServer:
         self.lock = threading.RLock()
         self.running = True
         self.failback_target = None
-<<<<<<< HEAD
-
-=======
         self.election_leader_info = None
     
->>>>>>> origin/main
     # ============ INICIALIZAÇÃO ============
 
     def load_initial_tasks(self, num_tasks: int = 60) -> None:
@@ -934,8 +930,6 @@ class MasterServer:
 
         logger.info(f"✓ {num_tasks} tarefas carregadas")
 
-<<<<<<< HEAD
-=======
     def _attach_election_info(self, response: dict) -> dict:
         """Anexa informação de líder eleito quando este master foi promovido."""
         if self.election_leader_info:
@@ -943,7 +937,6 @@ class MasterServer:
             response["ELECTION"] = dict(self.election_leader_info)
         return response
     
->>>>>>> origin/main
     # ============ PROTOCOLO - APRESENTAÇÃO (ALIVE) ============
 
     def handle_worker_alive(self, data: dict, worker_addr: tuple) -> dict:
@@ -978,25 +971,15 @@ class MasterServer:
         logger.info(f"✓ Worker {worker_uuid} conectado")
 
         if self.failback_target:
-<<<<<<< HEAD
-            return self._build_failback_redirect()
-=======
             return self._attach_election_info(self._build_failback_redirect())
-        
->>>>>>> origin/main
-        # Responder com HEARTBEAT ALIVE
+
+        # Responder com HEARTBEAT ALIVE (forma estrita: sem lista WORKERS)
         return self._attach_election_info({
             "SERVER_UUID": self.server_uuid,
             "TASK": "HEARTBEAT",
             "RESPONSE": "ALIVE",
-<<<<<<< HEAD
-        }
-
-=======
-            "WORKERS": self.task_manager.get_online_worker_snapshot(),
         })
     
->>>>>>> origin/main
     # ============ PROTOCOLO - DISTRIBUIÇÃO DE TAREFAS ============
 
     def handle_request_task(self, data: dict, worker_addr: tuple) -> dict:
@@ -1026,31 +1009,6 @@ class MasterServer:
 
         if not task_id:
             logger.debug(f"Nenhuma tarefa para {worker_uuid}")
-
-            # Tentar pedir ajuda a peers configurados
-            for peer in PEER_MASTERS:
-                try:
-                    peer_host, peer_port, peer_uuid = peer
-                except Exception:
-                    continue
-
-                # Request help using PDF envelope: type/request_id/payload
-                resp = self.request_help_to_peer(peer_host, peer_port, requested=1)
-
-<<<<<<< HEAD
-                # resp is normalized: {"type": ..., "request_id": ..., "payload": {...}}
-                if resp and resp.get("type") == "response_accepted":
-                    payload = resp.get("payload") or {}
-                    # If peer accepted and offered workers, redirect
-                    if payload.get("workers_offered", 0) > 0:
-                        logger.debug(f"Redirecionando para {peer_uuid}")
-                        return {
-                            "TASK": "REDIRECT",
-                            "TARGET_HOST": peer_host,
-                            "TARGET_PORT": peer_port,
-                            "TARGET_SERVER_UUID": peer_uuid,
-                        }
-
             return {"TASK": "NO_TASK"}
 
         # Atribuir tarefa ao worker
@@ -1061,9 +1019,7 @@ class MasterServer:
         self.task_manager.assign_task(task_id, worker_uuid)
         logger.info(f"➔ {task.operation} atribuída a {worker_uuid}")
 
-        # Construir payload `USER` conforme contrato de rede. Se a tarefa
-        # interna possui `user`, reutilizamos; caso contrário serializamos
-        # um JSON com `operation`/`values` dentro do campo `USER`.
+        # Construir payload `USER` conforme contrato de rede.
         try:
             user_payload = (
                 task.user
@@ -1078,36 +1034,6 @@ class MasterServer:
             "TASK": "QUERY",
             "USER": user_payload,
         }
-=======
-                if resp and resp.get("MASTER") == "RESPONSE_HELP" and resp.get("ACCEPT"):
-                    logger.debug(f"Redirecionando para {peer_uuid}")
-                    return self._attach_election_info({
-                        "TASK": "REDIRECT",
-                        "TARGET_HOST": peer_host,
-                        "TARGET_PORT": peer_port,
-                        "TARGET_SERVER_UUID": peer_uuid,
-                        "WORKERS": self.task_manager.get_online_worker_snapshot(),
-                    })
-
-            return self._attach_election_info({"TASK": "NO_TASK", "WORKERS": self.task_manager.get_online_worker_snapshot()})
-        
-        # Atribuir tarefa ao worker
-        task = self.task_manager.get_task(task_id)
-        if not task:
-            return self._attach_election_info({"TASK": "NO_TASK", "WORKERS": self.task_manager.get_online_worker_snapshot()})
-        
-        self.task_manager.assign_task(task_id, worker_uuid)
-        logger.info(f"➔ {task.operation} atribuída a {worker_uuid}")
-        
-        # Enviar tarefa
-        return self._attach_election_info({
-            "TASK": "QUERY",
-            "TASK_ID": task_id,
-            "OPERATION": task.operation,
-            "VALUES": task.values,
-            "WORKERS": self.task_manager.get_online_worker_snapshot(),
-        })
->>>>>>> origin/main
 
     def _build_failback_redirect(self) -> dict:
         """Constrói resposta de redirecionamento para o master original quando ele retornar."""
@@ -1120,14 +1046,9 @@ class MasterServer:
             "TARGET_HOST": target_host,
             "TARGET_PORT": target_port,
             "TARGET_SERVER_UUID": target_server,
-<<<<<<< HEAD
-        }
-
-=======
             "WORKERS": self.task_manager.get_online_worker_snapshot(),
         })
     
->>>>>>> origin/main
     # ============ PROTOCOLO - REPORTE DE STATUS ============
 
     def handle_task_result(self, data: dict, worker_addr: tuple) -> dict:
@@ -1171,11 +1092,6 @@ class MasterServer:
             error_msg = error or "Erro desconhecido"
             self.task_manager.fail_task(task_id, error_msg)
             logger.warning(f"✗ {task_id[:8]} falhou: {error_msg}")
-<<<<<<< HEAD
-
-        # Responder com ACK (conforme spec: minimal)
-        return {"STATUS": "ACK"}
-=======
         
         # Responder com ACK
         return self._attach_election_info({
@@ -1183,7 +1099,6 @@ class MasterServer:
             "TASK_ID": task_id,
             "WORKER_UUID": worker_uuid
         })
->>>>>>> origin/main
 
     # ============ PROTOCOLO - MASTER-TO-MASTER ============
 
