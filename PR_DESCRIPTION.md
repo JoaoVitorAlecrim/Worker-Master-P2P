@@ -30,13 +30,14 @@ Checklist
 
 Suggested PR body (copy/paste when creating PR):
 
-Changes implement strict JSON wire shapes for TCP and UDP per `plano_proj_SD-26_1` and add tests ensuring:
+Changes implement strict JSON wire shapes and add tests ensuring:
 
-- Master ↔ Master envelopes use exact keys: `MASTER`, `REQUEST_ID`, `PAYLOAD`.
+- Master ↔ Master envelopes use exact keys: `type`, `request_id`, `payload` (PDF-style spec).
 - Worker ↔ Master TCP messages only include allowed keys (no `TASK_ID`, `WORKERS`, `AUTH_TOKEN` on wire).
-- UDP election messages use `ELECTION`, `REQUEST_ID`, `PAYLOAD` with payload keys `CANDIDATE` / `WINNER`.
+- Master-to-master negotiation payloads use `master_id` / `workers_needed` and responses use `response_accepted` / `response_rejected` with `workers_offered` in the payload.
+- UDP election messages remain unchanged in their selection rule; this PR preserves the existing election algorithm while keeping backward/forward compatible parsing.
 
-All tests pass locally and CI should mirror the same checks.
+All tests pass locally (`python -m unittest discover -v tests`) and linters/formatters were applied (`ruff`, `black`).
 
 Create PR here:
 https://github.com/JoaoVitorAlecrim/Worker-Master-P2P/pull/new/feature/wire-spec-docs
