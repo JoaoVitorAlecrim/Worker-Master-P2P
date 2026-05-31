@@ -15,7 +15,7 @@ class TestTaskManagerLifecycleUser(unittest.TestCase):
 
         self.assertIsNotNone(task)
         self.assertEqual(task.user, user_payload)
-        self.assertEqual(task.status.name.lower(), 'pending')
+        self.assertEqual(task.status.name.lower(), "pending")
 
         # Atribuir à worker
         assigned = tm.assign_task(task.task_id, worker.worker_uuid)
@@ -24,15 +24,15 @@ class TestTaskManagerLifecycleUser(unittest.TestCase):
         # Verificar mudança de estado
         t = tm.get_task(task.task_id)
         self.assertIsNotNone(t)
-        self.assertEqual(t.status.name.lower(), 'in_progress')
+        self.assertEqual(t.status.name.lower(), "in_progress")
         self.assertEqual(t.assigned_worker, worker.worker_uuid)
 
         # Completar tarefa
         res = tm.complete_task(task.task_id, 3)
         self.assertTrue(res)
         t2 = tm.get_task(task.task_id)
-        self.assertEqual(t2.status.name.lower(), 'completed')
+        self.assertEqual(t2.status.name.lower(), "completed")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

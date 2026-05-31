@@ -9,11 +9,7 @@ def build_master_envelope(mtype: str, payload: Dict[str, Any], request_id: Optio
 
     Mantém compatibilidade com mensagens legadas que usam a chave `MASTER`.
     """
-    return {
-        "type": mtype.lower(),
-        "request_id": request_id or str(uuid.uuid4()),
-        "payload": payload
-    }
+    return {"type": mtype.lower(), "request_id": request_id or str(uuid.uuid4()), "payload": payload}
 
 
 def parse_master_envelope(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -26,7 +22,11 @@ def parse_master_envelope(data: Dict[str, Any]) -> Dict[str, Any]:
         return {"type": "unknown", "request_id": None, "payload": data}
 
     if "type" in data and "payload" in data:
-        return {"type": str(data.get("type")).lower(), "request_id": data.get("request_id"), "payload": data.get("payload")}
+        return {
+            "type": str(data.get("type")).lower(),
+            "request_id": data.get("request_id"),
+            "payload": data.get("payload"),
+        }
 
     # Compatibilidade com chave legada `MASTER`
     if "MASTER" in data:
@@ -58,3 +58,48 @@ def recv_json_line(sock_file) -> Optional[Dict[str, Any]]:
         return json.loads(line)
     except json.JSONDecodeError:
         return {"TASK": "ERROR", "MESSAGE": "JSON_INVALIDO"}
+
+
+def build_master_envelope_spec(mtype: str, payload: Dict[str, Any], request_id: Optional[str] = None) -> Dict[str, Any]:
+    """Builds a master↔master envelope using the PDF-style spec keys.
+
+    Spec format (exact keys):
+    {
+        "MASTER": "REQUEST_HELP",   # uppercase type name
+        "REQUEST_ID": "...",
+        "PAYLOAD": { ... }
+    }
+
+    This function does not mutate `payload` and keeps payload keys as-is.
+    """
+    return {"MASTER": str(mtype).upper(), "REQUEST_ID": request_id or str(uuid.uuid4()), "PAYLOAD": payload}
+
+
+def parse_master_envelope_spec(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Parses/validates a master↔master envelope in the PDF spec format.
+
+    Returns normalized dict: {"type": <lowercase>, "request_id": <id>, "payload": <dict>}.
+    If required fields are missing, returns an error dict with keys
+    {"error": "MISSING_FIELDS", "missing": [<fields>] }.
+
+    Unknown extra top-level fields are ignored.
+    """
+    if not isinstance(data, dict):
+        return {"error": "INVALID_FORMAT", "message": "envelope must be an object"}
+
+    missing = []
+    if "MASTER" not in data:
+        missing.append("MASTER")
+    if "REQUEST_ID" not in data:
+        missing.append("REQUEST_ID")
+    if "PAYLOAD" not in data:
+        missing.append("PAYLOAD")
+
+    if missing:
+        return {"error": "MISSING_FIELDS", "missing": missing}
+
+    mtype = str(data.get("MASTER"))
+    rid = data.get("REQUEST_ID")
+    payload = data.get("PAYLOAD")
+
+    return {"type": mtype.lower(), "request_id": rid, "payload": payload}

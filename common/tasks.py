@@ -11,13 +11,13 @@ def execute_task(task: Dict[str, Any]) -> Any:
     retornamos uma resposta simples reconhecendo o payload `user`.
     """
     # Suporta payload vindo da rede: {'user': '...'}
-    if 'user' in task and isinstance(task['user'], str):
-        user_payload = task['user']
+    if "user" in task and isinstance(task["user"], str):
+        user_payload = task["user"]
         try:
             parsed = json.loads(user_payload)
             if isinstance(parsed, dict):
-                operation = parsed.get('operation')
-                values = parsed.get('values', [])
+                operation = parsed.get("operation")
+                values = parsed.get("values", [])
             else:
                 return {"STATUS": "OK", "DETAIL": f"user: {user_payload}"}
         except Exception:

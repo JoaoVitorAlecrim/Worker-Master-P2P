@@ -238,3 +238,4 @@ Result:
 ## Risks
 - Removing WORKERS snapshots may reduce visibility; election must not depend on it.
 - UDP broadcast may be blocked in some environments; default to loopback broadcast and allow port override.
+

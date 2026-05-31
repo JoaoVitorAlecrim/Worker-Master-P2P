@@ -18,9 +18,9 @@ class TestTaskManagerUserPayload(unittest.TestCase):
 
         # to_dict should include the user field
         d = stored.to_dict()
-        self.assertIn('user', d)
-        self.assertEqual(d['user'], user_payload)
+        self.assertIn("user", d)
+        self.assertEqual(d["user"], user_payload)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

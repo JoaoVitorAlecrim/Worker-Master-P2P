@@ -12,7 +12,7 @@ import os
 import shutil
 from common.protocol import send_json, recv_json_line
 from common.tasks import execute_task
-from common.election import compute_winner
+from common.election import compute_winner, build_election_message_spec, parse_election_message_spec
 import json
 
 # Configuração
@@ -29,24 +29,27 @@ ELECTION_PORT = int(os.getenv("ELECTION_PORT", "5200"))
 ELECTION_BROADCAST_ADDR = os.getenv("ELECTION_BROADCAST_ADDR", "255.255.255.255")
 
 # Logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='[%(asctime)s] [WORKER] %(levelname)s: %(message)s'
-)
+logging.basicConfig(level=logging.INFO, format="[%(asctime)s] [WORKER] %(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 
 class WorkerClient:
     """Cliente Worker que conecta ao Master e executa tarefas."""
-    
-    def __init__(self, worker_uuid: str = WORKER_UUID, server_uuid: str = SERVER_UUID, master_host: str = MASTER_HOST, master_port: int = MASTER_PORT):
+
+    def __init__(
+        self,
+        worker_uuid: str = WORKER_UUID,
+        server_uuid: str = SERVER_UUID,
+        master_host: str = MASTER_HOST,
+        master_port: int = MASTER_PORT,
+    ):
         self.worker_uuid = worker_uuid
         self.server_uuid = server_uuid
         self.master_host = master_host
         self.master_port = master_port
         self.original_master_host = master_host
         self.original_master_port = master_port
-        self.auth_token = os.getenv('AUTH_TOKEN')
+        self.auth_token = os.getenv("AUTH_TOKEN")
         self.running = True
         self._buffered_response = None
         self.peer_registry = {}
@@ -116,12 +119,14 @@ class WorkerClient:
             if free_disk is None and worker_uuid == self.worker_uuid:
                 free_disk = self.get_free_disk_bytes()
 
-            candidates.append({
-                "WORKER_UUID": worker_uuid,
-                "HOST": host,
-                "FREE_DISK_BYTES": int(free_disk or 0),
-                "SERVER_UUID": info.get("SERVER_UUID") or self.server_uuid,
-            })
+            candidates.append(
+                {
+                    "WORKER_UUID": worker_uuid,
+                    "HOST": host,
+                    "FREE_DISK_BYTES": int(free_disk or 0),
+                    "SERVER_UUID": info.get("SERVER_UUID") or self.server_uuid,
+                }
+            )
 
         if not candidates:
             return {
@@ -153,44 +158,60 @@ class WorkerClient:
                     if not data:
                         continue
                     try:
-                        msg = json.loads(data.decode('utf-8'))
+                        msg = json.loads(data.decode("utf-8"))
                     except Exception:
                         continue
 
-                    mtype = msg.get('type')
-                    reqid = msg.get('request_id')
-                    payload = msg.get('payload') or {}
+                    # Support spec-format (ELECTION/REQUEST_ID/PAYLOAD) and legacy (type/request_id/payload)
+                    if "ELECTION" in msg:
+                        parsed = parse_election_message_spec(msg)
+                        if parsed.get("error"):
+                            continue
+                        mtype = parsed.get("type")
+                        reqid = parsed.get("request_id")
+                        payload = parsed.get("payload") or {}
+                    else:
+                        mtype = msg.get("type")
+                        reqid = msg.get("request_id")
+                        payload = msg.get("payload") or {}
 
-                    if mtype == 'election_start':
+                    if mtype in ("election_start", "start"):
                         # Reply with vote (our candidate info)
                         candidate = {
-                            'WORKER_UUID': self.worker_uuid,
-                            'HOST': self.peer_registry.get(self.worker_uuid, {}).get('HOST') or self.master_host,
-                            'FREE_DISK_BYTES': self.get_free_disk_bytes(),
-                            'SERVER_UUID': self.server_uuid,
+                            "WORKER_UUID": self.worker_uuid,
+                            "HOST": self.peer_registry.get(self.worker_uuid, {}).get("HOST") or self.master_host,
+                            "FREE_DISK_BYTES": self.get_free_disk_bytes(),
+                            "SERVER_UUID": self.server_uuid,
                         }
-                        reply = {'type': 'election_vote', 'request_id': reqid, 'payload': candidate}
+                        reply = build_election_message_spec("vote", {"CANDIDATE": candidate})
                         try:
-                            sock.sendto(json.dumps(reply).encode('utf-8'), (addr[0], ELECTION_PORT))
+                            sock.sendto(json.dumps(reply).encode("utf-8"), (addr[0], ELECTION_PORT))
                         except Exception:
                             pass
 
-                    elif mtype == 'election_vote':
+                    elif mtype in ("election_vote", "vote"):
+                        # payload may contain CANDIDATE key or be the candidate itself
+                        candidate = payload.get("CANDIDATE") if isinstance(payload, dict) and payload.get("CANDIDATE") else payload
                         with self._election_lock:
                             votes = self._election_votes.setdefault(reqid, [])
-                            votes.append(payload)
+                            votes.append(candidate)
 
-                    elif mtype == 'election_result':
-                        winner = payload.get('winner')
+                    elif mtype in ("election_result", "result"):
+                        # payload may contain WINNER key
+                        winner = None
+                        if isinstance(payload, dict):
+                            winner = payload.get("WINNER") or payload.get("winner")
                         if winner:
                             self._last_announced_winner = winner
                             # If winner is not self, update master pointer
-                            if winner.get('WORKER_UUID') != self.worker_uuid:
-                                host = winner.get('HOST') or self.master_host
+                            if winner.get("WORKER_UUID") != self.worker_uuid:
+                                host = winner.get("HOST") or self.master_host
                                 try:
                                     self.master_host = host
-                                    self.master_port = int(os.getenv('MASTER_PORT', str(self.master_port)))
-                                    logger.info(f"↪ Eleição: novo master anunciado {winner.get('WORKER_UUID')} em {host}")
+                                    self.master_port = int(os.getenv("MASTER_PORT", str(self.master_port)))
+                                    logger.info(
+                                        f"↪ Eleição: novo master anunciado {winner.get('WORKER_UUID')} em {host}"
+                                    )
                                 except Exception:
                                     pass
 
@@ -203,25 +224,25 @@ class WorkerClient:
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-            sock.sendto(json.dumps(message).encode('utf-8'), (ELECTION_BROADCAST_ADDR, ELECTION_PORT))
+            sock.sendto(json.dumps(message).encode("utf-8"), (ELECTION_BROADCAST_ADDR, ELECTION_PORT))
             try:
                 sock.close()
-            except:
+            except Exception:
                 pass
         except Exception:
             pass
 
     def _run_election(self, timeout: float = 1.0) -> dict:
         """Run a UDP broadcast election and return chosen winner dict."""
-        reqid = str(time.time()) + '-' + self.worker_uuid
+        reqid = str(time.time()) + "-" + self.worker_uuid
         # Broadcast election_start with our candidate info
         our_candidate = {
-            'WORKER_UUID': self.worker_uuid,
-            'HOST': self.peer_registry.get(self.worker_uuid, {}).get('HOST') or self.master_host,
-            'FREE_DISK_BYTES': self.get_free_disk_bytes(),
-            'SERVER_UUID': self.server_uuid,
+            "WORKER_UUID": self.worker_uuid,
+            "HOST": self.peer_registry.get(self.worker_uuid, {}).get("HOST") or self.master_host,
+            "FREE_DISK_BYTES": self.get_free_disk_bytes(),
+            "SERVER_UUID": self.server_uuid,
         }
-        start_msg = {'type': 'election_start', 'request_id': reqid, 'payload': our_candidate}
+        start_msg = build_election_message_spec("start", {"CANDIDATE": our_candidate}, request_id=reqid)
         # Reset votes store for this reqid
         with self._election_lock:
             self._election_votes[reqid] = [our_candidate]
@@ -242,11 +263,11 @@ class WorkerClient:
         winner = compute_winner(votes)
 
         # Announce winner
-        result_msg = {'type': 'election_result', 'request_id': reqid, 'payload': {'winner': winner}}
+        result_msg = build_election_message_spec("result", {"WINNER": winner}, request_id=reqid)
         self._send_udp_broadcast(result_msg)
 
         # Apply winner locally
-        if winner.get('WORKER_UUID') == self.worker_uuid:
+        if winner.get("WORKER_UUID") == self.worker_uuid:
             # Promote self
             return winner
         else:
@@ -266,13 +287,15 @@ class WorkerClient:
         t = threading.Thread(target=server.start, daemon=False)
         t.start()
 
-        logger.info(f"Promoted Master iniciado com UUID {promoted_server_uuid} (escutando em 0.0.0.0:{self.master_port})")
+        logger.info(
+            f"Promoted Master iniciado com UUID {promoted_server_uuid} (escutando em 0.0.0.0:{self.master_port})"
+        )
 
-        peers_env = os.getenv('MASTER_PEERS')
+        peers_env = os.getenv("MASTER_PEERS")
         if peers_env:
-            for part in peers_env.split(','):
+            for part in peers_env.split(","):
                 try:
-                    h, p, u = part.split(':')
+                    h, p, u = part.split(":")
                     p = int(p)
                 except Exception:
                     continue
@@ -280,24 +303,25 @@ class WorkerClient:
                 try:
                     sock = socket.create_connection((h, p), timeout=5)
                     sock.settimeout(5)
-                    sf = sock.makefile('r', encoding='utf-8')
+                    sf = sock.makefile("r", encoding="utf-8")
                     req = {
-                        'MASTER': 'REQUEST_STATE',
-                        'TARGET_SERVER': promoted_server_uuid,
-                        'FROM_WORKER': self.worker_uuid
+                        "MASTER": "REQUEST_STATE",
+                        "TARGET_SERVER": promoted_server_uuid,
+                        "FROM_WORKER": self.worker_uuid,
                     }
                     if self.auth_token:
-                        req['AUTH_TOKEN'] = self.auth_token
+                        req["AUTH_TOKEN"] = self.auth_token
                     from common.protocol import send_json, recv_json_line
+
                     send_json(sock, req)
                     resp = recv_json_line(sf)
                     try:
                         sock.close()
-                    except:
+                    except Exception:
                         pass
 
-                    if resp and resp.get('MASTER') == 'RESPONSE_STATE' and resp.get('FOUND'):
-                        state = resp.get('STATE')
+                    if resp and resp.get("MASTER") == "RESPONSE_STATE" and resp.get("FOUND"):
+                        state = resp.get("STATE")
                         if state:
                             logger.info(f"Estado recebido de peer {h}:{p}, carregando...")
                             server.task_manager.load_state_dict(state)
@@ -349,7 +373,9 @@ class WorkerClient:
         if self.master_failure_count < PROMOTE_THRESHOLD:
             return False
 
-        logger.warning(f"Eleição disparada após {self.master_failure_count} falhas. Iniciando protocolo de eleição UDP...")
+        logger.warning(
+            f"Eleição disparada após {self.master_failure_count} falhas. Iniciando protocolo de eleição UDP..."
+        )
 
         # Run networked election
         try:
@@ -372,11 +398,11 @@ class WorkerClient:
         self.master_failure_count = 0
         logger.info(f"↪ Reapontando conexão para o novo master {winner_uuid} em {self.master_host}:{self.master_port}")
         return False
-    
+
     def send_alive(self, sock: socket.socket) -> bool:
         """
         Envia apresentação ALIVE ao Master.
-        
+
         Payload:
         {
             "WORKER": "ALIVE",
@@ -392,37 +418,37 @@ class WorkerClient:
                 "FREE_DISK_BYTES": self.get_free_disk_bytes(),
             }
             if self.auth_token:
-                message['AUTH_TOKEN'] = self.auth_token
+                message["AUTH_TOKEN"] = self.auth_token
             send_json(sock, message)
-            logger.info(f"✓ Apresentação enviada (ALIVE)")
+            logger.info("✓ Apresentação enviada (ALIVE)")
             return True
         except Exception as exc:
             logger.error(f"Erro ao enviar ALIVE: {exc}")
             return False
-    
+
     def wait_heartbeat_response(self, sock_file) -> bool:
         """Aguarda resposta do Master (HEARTBEAT ou tarefa direto)."""
         try:
             response = recv_json_line(sock_file)
-            
+
             if response is None:
                 logger.debug("Conexão encerrada pelo Master")
                 return False
-            
+
             # Aceita qualquer resposta TASK válida
             task_type = response.get("TASK")
             if task_type in ["HEARTBEAT", "QUERY", "NO_TASK", "REDIRECT"]:
                 self.update_peer_registry(response)
-                logger.info(f"✓ Conectado ao Master")
+                logger.info("✓ Conectado ao Master")
                 return True
-            
+
             logger.warning(f"Resposta inesperada: {response}")
             return False
-        
+
         except Exception as exc:
             logger.debug(f"Erro ao receber resposta: {exc}")
             return False
-    
+
     def request_task(self, sock: socket.socket) -> bool:
         """
         Solicita tarefa ao Master (mesmo payload da apresentação).
@@ -435,13 +461,13 @@ class WorkerClient:
                 "FREE_DISK_BYTES": self.get_free_disk_bytes(),
             }
             if self.auth_token:
-                message['AUTH_TOKEN'] = self.auth_token
+                message["AUTH_TOKEN"] = self.auth_token
             send_json(sock, message)
             return True
         except Exception as exc:
             logger.warning(f"Erro ao solicitar tarefa: {exc}")
             return False
-    
+
     def wait_task_response(self, sock_file) -> dict:
         """
         Aguarda resposta com tarefa ou NO_TASK.
@@ -449,31 +475,28 @@ class WorkerClient:
         """
         try:
             response = recv_json_line(sock_file)
-            
+
             if response is None:
                 logger.warning("Conexão encerrada pelo Master")
                 return None
-            
+
             task_type = response.get("TASK")
-            
+
             if task_type == "NO_TASK":
                 self.update_peer_registry(response)
                 logger.debug("Nenhuma tarefa disponível")
                 return None
-            
+
             elif task_type == "QUERY":
                 task_id = response.get("TASK_ID")
 
                 # Novo contrato: master envia `USER` apenas. Suportamos ambos
                 # formatos para compatibilidade.
-                if 'USER' in response and isinstance(response.get('USER'), str):
-                    user = response.get('USER')
+                if "USER" in response and isinstance(response.get("USER"), str):
+                    user = response.get("USER")
                     self.update_peer_registry(response)
                     logger.info(f"→ Tarefa {task_id[:8] if task_id else 'unknown'} (user)")
-                    return {
-                        "TASK_ID": task_id,
-                        "USER": user
-                    }
+                    return {"TASK_ID": task_id, "USER": user}
 
                 # Formato legado com OPERATION/VALUES
                 operation = response.get("OPERATION")
@@ -482,15 +505,11 @@ class WorkerClient:
                 if task_id and operation and values is not None:
                     self.update_peer_registry(response)
                     logger.info(f"→ Tarefa {task_id[:8]} ({operation})")
-                    return {
-                        "TASK_ID": task_id,
-                        "OPERATION": operation,
-                        "VALUES": values
-                    }
+                    return {"TASK_ID": task_id, "OPERATION": operation, "VALUES": values}
 
                 logger.error(f"Tarefa incompleta: {response}")
                 return None
-            
+
             elif response.get("TASK") == "ERROR":
                 logger.error(f"Erro do Master: {response.get('MESSAGE')}")
                 return None
@@ -504,26 +523,20 @@ class WorkerClient:
 
                 logger.info(f"↪ Redirecionamento recebido: {target_host}:{target_port} (server={target_server})")
 
-                return {
-                    "REDIRECT": {
-                        "HOST": target_host,
-                        "PORT": target_port,
-                        "SERVER_UUID": target_server
-                    }
-                }
-            
+                return {"REDIRECT": {"HOST": target_host, "PORT": target_port, "SERVER_UUID": target_server}}
+
             else:
                 logger.warning(f"Resposta desconhecida: {response}")
                 return None
-        
+
         except Exception as exc:
             logger.error(f"Erro ao receber tarefa: {exc}")
             return None
-    
+
     def execute_and_report(self, sock: socket.socket, sock_file, task: dict) -> bool:
         """
         Executa tarefa e reporta resultado.
-        
+
         Payload de sucesso:
         {
             "STATUS": "OK",
@@ -531,7 +544,7 @@ class WorkerClient:
             "WORKER_UUID": "Worker_1",
             "RESULT": <resultado>
         }
-        
+
         Payload de falha:
         {
             "STATUS": "NOK",
@@ -542,57 +555,49 @@ class WorkerClient:
         """
         task_id = task.get("TASK_ID")
 
-        # Passa o dicionário direto para `execute_task`, que aceita tanto o
-        # formato interno (`operation`/`values`) quanto o `user`.
+        # Executa tarefa (aceita formatos internos e user)
         try:
             result = execute_task(task)
-            
-            # Reportar sucesso
+
+            # Reportar sucesso — conforme contrato de rede, enviar mensagem mínima
             message = {
                 "STATUS": "OK",
-                "TASK_ID": task_id,
                 "WORKER_UUID": self.worker_uuid,
-                "RESULT": result
             }
-            
+
             send_json(sock, message)
-            logger.info(f"✓ Tarefa {task_id[:8]} completada (resultado: {result})")
-            
+            logger.info(f"✓ Tarefa {task_id[:8] if task_id else 'unknown'} completada (resultado: {result})")
+
             # Aguardar ACK
             return self.wait_ack(sock_file)
-        
+
         except Exception as exc:
-            logger.warning(f"Erro ao executar tarefa {task_id[:8]}: {exc}")
-            
-            # Reportar falha
-            message = {
-                "STATUS": "NOK",
-                "TASK_ID": task_id,
-                "WORKER_UUID": self.worker_uuid,
-                "ERROR": str(exc)
-            }
-            
+            logger.warning(f"Erro ao executar tarefa {task_id[:8] if task_id else 'unknown'}: {exc}")
+
+            # Reportar falha (mensagem mínima)
+            message = {"STATUS": "NOK", "WORKER_UUID": self.worker_uuid, "ERROR": str(exc)}
+
             send_json(sock, message)
-            logger.debug(f"Falha reportada ao master")
-            
+            logger.debug("Falha reportada ao master")
+
             # Aguardar ACK mesmo na falha
             return self.wait_ack(sock_file)
-    
+
     def wait_ack(self, sock_file) -> bool:
         """Aguarda confirmação ACK do Master."""
         try:
             response = recv_json_line(sock_file)
-            
+
             if response and response.get("STATUS") == "ACK":
                 return True
-            
+
             logger.debug(f"ACK não recebido: {response}")
             return False
-        
+
         except Exception as exc:
             logger.debug(f"Erro ao receber ACK: {exc}")
             return False
-    
+
     def run(self) -> None:
         """Loop principal do worker."""
         while self.running:
@@ -607,72 +612,74 @@ class WorkerClient:
 
             try:
                 logger.info(f"Tentando conectar ao Master ({self.master_host}:{self.master_port})...")
-                
+
                 with socket.create_connection((self.master_host, self.master_port), timeout=10) as sock:
                     sock.settimeout(SOCKET_TIMEOUT)
                     sock_file = sock.makefile("r", encoding="utf-8")
-                    
-                    logger.info(f"✓ Conectado ao Master")
+
+                    logger.info("✓ Conectado ao Master")
                     self.master_failure_count = 0
-                    
+
                     # Fase 1: Apresentação (ALIVE)
                     if not self.send_alive(sock):
                         if self.handle_master_failure():
                             continue
                         continue
-                    
+
                     if not self.wait_heartbeat_response(sock_file):
                         if self.handle_master_failure():
                             continue
                         continue
-                    
+
                     # Fase 2-4: Loop de trabalho
                     while self.running:
                         # Solicitar próxima tarefa
                         if not self.request_task(sock):
                             break
-                        
+
                         # Aguardar tarefa
                         task = self.wait_task_response(sock_file)
-                        
+
                         # Redirecionamento: atualizar target e reconectar
                         if isinstance(task, dict) and task.get("REDIRECT"):
                             redirect = task["REDIRECT"]
                             self.master_host = redirect.get("HOST") or self.master_host
                             self.master_port = redirect.get("PORT") or self.master_port
                             self.server_uuid = redirect.get("SERVER_UUID") or self.server_uuid
-                            logger.info(f"↪ Atualizando master alvo para {self.master_host}:{self.master_port} (server={self.server_uuid}) and reconnecting")
+                            logger.info(
+                                f"↪ Atualizando master alvo para {self.master_host}:{self.master_port} (server={self.server_uuid}) and reconnecting"
+                            )
                             # Force reconnection by breaking inner loop
                             break
-                        
+
                         if task is None:
                             # Sem tarefa, aguardar e tentar novamente
                             time.sleep(HEARTBEAT_INTERVAL)
                             continue
-                        
+
                         # Executar tarefa e reportar
                         self.execute_and_report(sock, sock_file, task)
-                        
+
                         # Pequeno delay antes de solicitar próxima tarefa
                         time.sleep(0.5)
-            
+
             except socket.timeout:
                 logger.warning(f"Timeout de conexão/comunicação. Reconectando em {RECONNECT_DELAY}s...")
                 if self.handle_master_failure():
                     continue
                 time.sleep(RECONNECT_DELAY)
-            
+
             except (ConnectionRefusedError, OSError) as exc:
                 logger.warning(f"Master indisponível: {exc}. Reconectando em {RECONNECT_DELAY}s...")
                 if self.handle_master_failure():
                     continue
                 time.sleep(RECONNECT_DELAY)
-            
+
             except KeyboardInterrupt:
                 logger.info("\n🛑 Worker encerrado pelo usuário")
                 self.running = False
                 break
-            
+
             except Exception as exc:
                 logger.error(f"Erro inesperado: {exc}")
                 if self.handle_master_failure():
@@ -684,6 +691,6 @@ if __name__ == "__main__":
     # Permitir passar UUID via argumentos
     worker_uuid = sys.argv[1] if len(sys.argv) > 1 else WORKER_UUID
     server_uuid = sys.argv[2] if len(sys.argv) > 2 else SERVER_UUID
-    
+
     worker = WorkerClient(worker_uuid=worker_uuid, server_uuid=server_uuid)
     worker.run()
