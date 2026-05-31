@@ -42,6 +42,380 @@ if peers_env:
             h, p, u = part.split(":")
             PEER_MASTERS.append((h, int(p), u))
         except Exception:
+            print(f"MASTER_PEERS inválido: {part}")
+
+# Logging
+logging.basicConfig(level=logging.INFO, format="[%(asctime)s] [MASTER] %(levelname)s: %(message)s")
+logger = logging.getLogger(__name__)
+
+
+class MasterServer:
+    """Servidor Master que gerencia workers e distribui tarefas."""
+
+    def __init__(self, server_uuid: str = SERVER_UUID):
+        self.server_uuid = server_uuid
+        self.task_manager = TaskManager()
+        self.worker_connections: Dict[str, socket.socket] = {}  # worker_uuid -> socket
+        self.lock = threading.RLock()
+        self.running = True
+        self.failback_target = None
+        self.election_leader_info = None
+
+    def load_initial_tasks(self, num_tasks: int = 60) -> None:
+        logger.info(f"Carregando {num_tasks} tarefas iniciais...")
+        for i in range(num_tasks):
+            if i % 3 == 0:
+                self.task_manager.create_task("soma", [i + 1, i + 2])
+            elif i % 3 == 1:
+                self.task_manager.create_task("multiplicacao", [i + 2, i + 3])
+            else:
+                self.task_manager.create_task("sleep", [1])
+        logger.info(f"✓ {num_tasks} tarefas carregadas")
+
+    def _attach_election_info(self, response: dict) -> dict:
+        if self.election_leader_info:
+            response = dict(response)
+            response["ELECTION"] = dict(self.election_leader_info)
+        return response
+
+    def handle_worker_alive(self, data: dict, worker_addr: tuple) -> dict:
+        worker_uuid = data.get("WORKER_UUID")
+        original_master = data.get("SERVER_UUID", self.server_uuid)
+        free_disk_bytes = data.get("FREE_DISK_BYTES")
+
+        if not worker_uuid:
+            logger.warning(f"Worker em {worker_addr} sem WORKER_UUID")
+            return {"TASK": "ERROR", "MESSAGE": "WORKER_UUID obrigatório"}
+
+        _ = self.task_manager.register_worker(
+            worker_uuid,
+            original_master,
+            host=worker_addr[0],
+            free_disk_bytes=free_disk_bytes,
+        )
+        self.task_manager.update_worker_heartbeat(worker_uuid)
+
+        logger.info(f"✓ Worker {worker_uuid} conectado")
+
+        if self.failback_target:
+            return self._attach_election_info(self._build_failback_redirect())
+
+        return self._attach_election_info({
+            "SERVER_UUID": self.server_uuid,
+            "TASK": "HEARTBEAT",
+            "RESPONSE": "ALIVE",
+        })
+
+    def handle_request_task(self, data: dict, worker_addr: tuple) -> dict:
+        worker_uuid = data.get("WORKER_UUID")
+        if not worker_uuid:
+            return {"TASK": "ERROR", "MESSAGE": "WORKER_UUID obrigatório"}
+
+        self.task_manager.update_worker_heartbeat(worker_uuid)
+
+        if self.failback_target:
+            return self._attach_election_info(self._build_failback_redirect())
+
+        task_id = self.task_manager.get_pending_task()
+        if not task_id:
+            logger.debug(f"Nenhuma tarefa para {worker_uuid}")
+            for peer in PEER_MASTERS:
+                try:
+                    peer_host, peer_port, peer_uuid = peer
+                except Exception:
+                    continue
+
+                resp = self.request_help_to_peer(peer_host, peer_port, requested=1)
+                if resp and isinstance(resp, dict) and resp.get("type") == "response_accepted":
+                    payload = resp.get("payload") or {}
+                    if payload.get("workers_offered", 0) > 0:
+                        logger.debug(f"Redirecionando para {peer_uuid}")
+                        return self._attach_election_info({
+                            "TASK": "REDIRECT",
+                            "TARGET_HOST": peer_host,
+                            "TARGET_PORT": peer_port,
+                            "TARGET_SERVER_UUID": peer_uuid,
+                        })
+
+            return self._attach_election_info({"TASK": "NO_TASK"})
+
+        task = self.task_manager.get_task(task_id)
+        if not task:
+            return self._attach_election_info({"TASK": "NO_TASK"})
+
+        self.task_manager.assign_task(task_id, worker_uuid)
+        logger.info(f"➔ {task.operation} atribuída a {worker_uuid}")
+
+        try:
+            user_payload = (
+                task.user
+                if getattr(task, "user", None)
+                else json.dumps({"operation": task.operation, "values": task.values})
+            )
+        except Exception:
+            user_payload = json.dumps({"operation": task.operation, "values": task.values})
+
+        return {"TASK": "QUERY", "USER": user_payload}
+
+    def _build_failback_redirect(self) -> dict:
+        target_host = self.failback_target.get("TARGET_HOST")
+        target_port = self.failback_target.get("TARGET_PORT")
+        target_server = self.failback_target.get("TARGET_SERVER_UUID")
+
+        return {"TASK": "REDIRECT", "TARGET_HOST": target_host, "TARGET_PORT": target_port, "TARGET_SERVER_UUID": target_server}
+
+    def handle_task_result(self, data: dict, worker_addr: tuple) -> dict:
+        task_id = data.get("TASK_ID")
+        worker_uuid = data.get("WORKER_UUID")
+        status = data.get("STATUS")
+        result = data.get("RESULT")
+        error = data.get("ERROR")
+
+        if not task_id and worker_uuid:
+            task_id = self.task_manager.worker_tasks.get(worker_uuid)
+
+        if not worker_uuid or not status or not task_id:
+            logger.warning(f"Reporte incompleto de {worker_uuid}")
+            return {"STATUS": "ERROR", "MESSAGE": "Campos obrigatórios faltando"}
+
+        task = self.task_manager.get_task(task_id)
+        if not task:
+            logger.warning(f"Tarefa {task_id} não encontrada")
+            return {"STATUS": "ERROR", "MESSAGE": "TASK_ID desconhecido"}
+
+        if status == "OK":
+            self.task_manager.complete_task(task_id, result)
+            logger.info(f"✓ {task_id[:8]} completada por {worker_uuid}")
+        else:
+            error_msg = error or "Erro desconhecido"
+            self.task_manager.fail_task(task_id, error_msg)
+            logger.warning(f"✗ {task_id[:8]} falhou: {error_msg}")
+
+        return self._attach_election_info({"STATUS": "ACK"})
+
+    def handle_master_request(self, data: dict, addr: tuple) -> dict:
+        env = parse_master_envelope_spec(data)
+        if isinstance(env, dict) and env.get("error"):
+            env = parse_master_envelope(data)
+        mtype = env.get("type")
+        payload = env.get("payload") or {}
+
+        if MASTER_AUTH_TOKEN:
+            if payload.get("AUTH_TOKEN") != MASTER_AUTH_TOKEN:
+                logger.warning(f"Auth failed for master at {addr}")
+                return build_master_envelope("error", {"message": "AUTH_FAILED"}, request_id=env.get("request_id"))
+
+        if mtype == "request_help":
+            requested = payload.get("workers_needed", 0)
+            from_server = payload.get("master_id") or payload.get("from_server")
+
+            stats = self.task_manager.get_statistics()
+            current_load = stats["tasks"]["pending"] + stats["tasks"]["in_progress"]
+            threshold = int(CAPACITY * 0.7)
+            can_accept = current_load + requested <= threshold
+
+            logger.info(f"Master request from {from_server}: requested={requested}, load={current_load}, accept={can_accept}")
+
+            if can_accept:
+                offer = min(requested, max(0, threshold - current_load))
+                return build_master_envelope_spec("response_accepted", {"workers_offered": offer, "worker_details": []}, request_id=env.get("request_id"))
+            else:
+                return build_master_envelope_spec("response_rejected", {"reason": "high_load"}, request_id=env.get("request_id"))
+
+        if mtype == "request_state":
+            target = payload.get("TARGET_SERVER") or payload.get("target_server")
+            if not target:
+                return build_master_envelope("error", {"message": "TARGET_SERVER faltando"}, request_id=env.get("request_id"))
+
+            try:
+                path = self.task_manager._state_path(target)
+                if not path or not os.path.exists(path):
+                    return build_master_envelope("response_state", {"FOUND": False}, request_id=env.get("request_id"))
+
+                with open(path, "r", encoding="utf-8") as f:
+                    state = json.load(f)
+
+                return build_master_envelope("response_state", {"FOUND": True, "TARGET_SERVER": target, "STATE": state}, request_id=env.get("request_id"))
+
+            except Exception as exc:
+                logger.warning(f"Erro ao fornecer estado para {addr}: {exc}")
+                return build_master_envelope("error", {"message": str(exc)}, request_id=env.get("request_id"))
+
+        logger.warning(f"Mensagem MASTER desconhecida de {addr}: {data}")
+        return build_master_envelope("error", {"message": "Tipo MASTER desconhecido"}, request_id=env.get("request_id"))
+
+    def request_help_to_peer(self, peer_host: str, peer_port: int, requested: int = 1, timeout: int = 5) -> dict:
+        payload = {"master_id": self.server_uuid, "workers_needed": requested, "current_load": self.task_manager.get_statistics()}
+        envelope = build_master_envelope_spec("request_help", payload)
+
+        try:
+            sock = socket.create_connection((peer_host, peer_port), timeout=timeout)
+            sock.settimeout(timeout)
+            sock_file = sock.makefile("r", encoding="utf-8")
+
+            send_json(sock, envelope)
+            response = recv_json_line(sock_file)
+
+            if response and isinstance(response, dict):
+                parsed = None
+                try:
+                    parsed = parse_master_envelope_spec(response)
+                except Exception:
+                    parsed = parse_master_envelope(response)
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+                return parsed or {}
+
+            try:
+                sock.close()
+            except Exception:
+                pass
+            return {}
+
+        except Exception as exc:
+            logger.warning(f"Não foi possível contatar peer {peer_host}:{peer_port}: {exc}")
+            return {"type": "error", "message": str(exc)}
+
+    def handle_client(self, conn: socket.socket, addr: tuple) -> None:
+        logger.info(f"Conexão recebida de {addr}")
+        worker_uuid = None
+
+        try:
+            conn.settimeout(SOCKET_TIMEOUT)
+            sock_file = conn.makefile("r", encoding="utf-8")
+
+            while self.running:
+                data = recv_json_line(sock_file)
+                if data is None:
+                    logger.info(f"Worker desconectado: {addr}")
+                    break
+
+                logger.info(f"[{addr}] Recebido: {data.get('WORKER', data.get('STATUS', 'UNKNOWN'))}")
+
+                if data.get("WORKER") == "ALIVE":
+                    worker_uuid = data.get("WORKER_UUID")
+                    worker = self.task_manager.get_worker(worker_uuid) if worker_uuid else None
+                    if worker is None:
+                        self.handle_worker_alive(data, addr)
+                    else:
+                        resp = self.handle_request_task(data, addr)
+                        try:
+                            send_json(conn, resp)
+                        except Exception:
+                            pass
+
+                elif data.get("STATUS") in ["OK", "NOK"]:
+                    self.handle_task_result(data, addr)
+
+                worker_uuid = data.get("WORKER_UUID") or worker_uuid
+                if worker_uuid:
+                    self.task_manager.update_worker_heartbeat(worker_uuid)
+
+        except Exception as exc:
+            logger.error(f"Erro no monitor: {exc}")
+
+    def start(self) -> None:
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.settimeout(1.0)
+
+        try:
+            server.bind((HOST, PORT))
+            server.listen(5)
+            logger.info(f"🚀 Master Server iniciado em {HOST}:{PORT}")
+            logger.info(f"   UUID: {self.server_uuid}")
+
+            try:
+                self.task_manager.set_persistence(self.server_uuid)
+                load_state_flag = os.getenv("LOAD_STATE", "1")
+                if str(load_state_flag).lower() in ("1", "true", "yes", "y"):
+                    self.task_manager.load_state(self.server_uuid)
+                else:
+                    logger.info("LOAD_STATE desabilitado — iniciando sem carregar estado persistido")
+            except Exception:
+                pass
+
+            if not self.task_manager.tasks:
+                try:
+                    num_tasks = int(os.getenv("INITIAL_TASKS", "60"))
+                except Exception:
+                    num_tasks = 60
+                if num_tasks > 0:
+                    self.load_initial_tasks(num_tasks)
+
+            monitor_thread = threading.Thread(target=self.worker_monitor_thread, daemon=True)
+            monitor_thread.start()
+
+            while self.running:
+                try:
+                    conn, addr = server.accept()
+                except socket.timeout:
+                    continue
+
+                logger.info(f"📨 Conexão recebida de {addr}")
+                worker_thread = threading.Thread(target=self.handle_client, args=(conn, addr), daemon=True)
+                worker_thread.start()
+
+        except KeyboardInterrupt:
+            logger.info("\n🛑 Master encerrado pelo usuário")
+        except Exception as exc:
+            logger.error(f"Erro fatal: {exc}")
+
+        finally:
+            self.running = False
+            server.close()
+            logger.info("Socket fechado")
+
+
+if __name__ == "__main__":
+    master = MasterServer(SERVER_UUID)
+    master.start()
+"""
+Master Server - Gerenciador de Workers e Distribuidor de Tarefas.
+Implementa protocolo P2P com detecção de falhas e remande automático.
+"""
+
+import socket
+import threading
+import logging
+import json
+from typing import Dict
+from common.protocol import (
+    send_json,
+    recv_json_line,
+    build_master_envelope,
+    parse_master_envelope,
+    build_master_envelope_spec,
+    parse_master_envelope_spec,
+)
+from common.task_manager import TaskManager
+from common.models import WorkerStatus
+
+import os
+
+# Configuração (podem ser sobrescritas via env para testes)
+HOST = os.getenv("MASTER_HOST", "0.0.0.0")
+PORT = int(os.getenv("MASTER_PORT", "5000"))
+SERVER_UUID = os.getenv("SERVER_UUID", "Master_A")
+MASTER_AUTH_TOKEN = os.getenv("MASTER_AUTH_TOKEN")
+SOCKET_TIMEOUT = 15
+HEARTBEAT_TIMEOUT = 15  # Segundos até considerar worker offline
+TASK_TIMEOUT = 30  # Segundos até considerar tarefa expirada
+WORKER_CHECK_INTERVAL = 5  # Segundos entre checks de workers
+CAPACITY = 100  # Número máximo de tarefas pendentes
+# Lista de masters pares (lab config). Pode ser passada via env MASTER_PEERS como
+# "host:port:uuid,host2:port2:uuid2"
+PEER_MASTERS = []
+logger = logging.getLogger(__name__)
+peers_env = os.getenv("MASTER_PEERS")
+if peers_env:
+    for part in peers_env.split(","):
+        try:
+            h, p, u = part.split(":")
+            PEER_MASTERS.append((h, int(p), u))
+        except Exception:
             # Logging not yet configured here; fallback to print
             print(f"MASTER_PEERS inválido: {part}")
 
