@@ -326,9 +326,22 @@ class WorkerClient:
             
             elif task_type == "QUERY":
                 task_id = response.get("TASK_ID")
+
+                # Novo contrato: master envia `USER` apenas. Suportamos ambos
+                # formatos para compatibilidade.
+                if 'USER' in response and isinstance(response.get('USER'), str):
+                    user = response.get('USER')
+                    self.update_peer_registry(response)
+                    logger.info(f"→ Tarefa {task_id[:8] if task_id else 'unknown'} (user)")
+                    return {
+                        "TASK_ID": task_id,
+                        "USER": user
+                    }
+
+                # Formato legado com OPERATION/VALUES
                 operation = response.get("OPERATION")
                 values = response.get("VALUES")
-                
+
                 if task_id and operation and values is not None:
                     self.update_peer_registry(response)
                     logger.info(f"→ Tarefa {task_id[:8]} ({operation})")
@@ -337,9 +350,9 @@ class WorkerClient:
                         "OPERATION": operation,
                         "VALUES": values
                     }
-                else:
-                    logger.error(f"Tarefa incompleta: {response}")
-                    return None
+
+                logger.error(f"Tarefa incompleta: {response}")
+                return None
             
             elif response.get("TASK") == "ERROR":
                 logger.error(f"Erro do Master: {response.get('MESSAGE')}")
@@ -391,15 +404,11 @@ class WorkerClient:
         }
         """
         task_id = task.get("TASK_ID")
-        operation = task.get("OPERATION")
-        values = task.get("VALUES")
-        
+
+        # Passa o dicionário direto para `execute_task`, que aceita tanto o
+        # formato interno (`operation`/`values`) quanto o `user`.
         try:
-            # Executar tarefa (com delay de 1s já no execute_task)
-            result = execute_task({
-                "operation": operation,
-                "values": values
-            })
+            result = execute_task(task)
             
             # Reportar sucesso
             message = {

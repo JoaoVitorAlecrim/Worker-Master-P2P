@@ -186,12 +186,19 @@ class MasterServer:
         self.task_manager.assign_task(task_id, worker_uuid)
         logger.info(f"➔ {task.operation} atribuída a {worker_uuid}")
         
-        # Enviar tarefa
+        # Construir payload `USER` conforme contrato de rede. Se a tarefa
+        # interna possui `user`, reutilizamos; caso contrário serializamos
+        # um JSON com `operation`/`values` dentro do campo `USER`.
+        try:
+            user_payload = task.user if getattr(task, 'user', None) else json.dumps({"operation": task.operation, "values": task.values})
+        except Exception:
+            user_payload = json.dumps({"operation": task.operation, "values": task.values})
+
+        # Enviar tarefa respeitando o contrato: somente `TASK` e `USER` são obrigatórios
         return {
             "TASK": "QUERY",
             "TASK_ID": task_id,
-            "OPERATION": task.operation,
-            "VALUES": task.values,
+            "USER": user_payload,
             "WORKERS": self.task_manager.get_online_worker_snapshot(),
         }
 
