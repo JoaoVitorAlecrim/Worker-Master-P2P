@@ -12,6 +12,8 @@ import os
 import shutil
 from common.protocol import send_json, recv_json_line
 from common.tasks import execute_task
+from common.election import compute_winner
+import json
 
 # Configuração
 MASTER_HOST = os.getenv("MASTER_HOST", "127.0.0.1")
@@ -23,6 +25,8 @@ HEARTBEAT_INTERVAL = int(os.getenv("HEARTBEAT_INTERVAL", "10"))
 RECONNECT_DELAY = int(os.getenv("RECONNECT_DELAY", "3"))
 SOCKET_TIMEOUT = int(os.getenv("SOCKET_TIMEOUT", "15"))
 PROMOTE_THRESHOLD = int(os.getenv("PROMOTE_THRESHOLD", "4"))  # falhas consecutivas antes da eleição
+ELECTION_PORT = int(os.getenv("ELECTION_PORT", "5200"))
+ELECTION_BROADCAST_ADDR = os.getenv("ELECTION_BROADCAST_ADDR", "255.255.255.255")
 
 # Logging
 logging.basicConfig(
@@ -53,6 +57,17 @@ class WorkerClient:
         self.failback_target = None
         self.failback_detected_at = None
         self.failback_grace_seconds = int(os.getenv("FAILBACK_GRACE_SECONDS", "5"))
+        # Election state
+        self._election_lock = threading.RLock()
+        self._election_votes = {}  # request_id -> list of candidate dicts
+        self._last_announced_winner = None
+
+        # UDP listener for internal election messages
+        try:
+            t = threading.Thread(target=self._udp_election_listener, daemon=True)
+            t.start()
+        except Exception:
+            logger.warning("Falha ao iniciar listener UDP de eleição")
 
     def get_free_disk_bytes(self) -> int:
         """Retorna espaço livre em disco do diretório atual."""
@@ -118,6 +133,124 @@ class WorkerClient:
 
         candidates.sort(key=lambda item: (-item["FREE_DISK_BYTES"], item["WORKER_UUID"]))
         return candidates[0]
+
+    # ============ ELECTION (UDP BROADCAST) ============
+
+    def _udp_election_listener(self) -> None:
+        """Listener UDP que responde a pedidos de eleição e processa resultados anunciados."""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind(("", ELECTION_PORT))
+            except Exception:
+                # Binding might fail if another process bound it; still try to recv
+                pass
+
+            while self.running:
+                try:
+                    data, addr = sock.recvfrom(65536)
+                    if not data:
+                        continue
+                    try:
+                        msg = json.loads(data.decode('utf-8'))
+                    except Exception:
+                        continue
+
+                    mtype = msg.get('type')
+                    reqid = msg.get('request_id')
+                    payload = msg.get('payload') or {}
+
+                    if mtype == 'election_start':
+                        # Reply with vote (our candidate info)
+                        candidate = {
+                            'WORKER_UUID': self.worker_uuid,
+                            'HOST': self.peer_registry.get(self.worker_uuid, {}).get('HOST') or self.master_host,
+                            'FREE_DISK_BYTES': self.get_free_disk_bytes(),
+                            'SERVER_UUID': self.server_uuid,
+                        }
+                        reply = {'type': 'election_vote', 'request_id': reqid, 'payload': candidate}
+                        try:
+                            sock.sendto(json.dumps(reply).encode('utf-8'), (addr[0], ELECTION_PORT))
+                        except Exception:
+                            pass
+
+                    elif mtype == 'election_vote':
+                        with self._election_lock:
+                            votes = self._election_votes.setdefault(reqid, [])
+                            votes.append(payload)
+
+                    elif mtype == 'election_result':
+                        winner = payload.get('winner')
+                        if winner:
+                            self._last_announced_winner = winner
+                            # If winner is not self, update master pointer
+                            if winner.get('WORKER_UUID') != self.worker_uuid:
+                                host = winner.get('HOST') or self.master_host
+                                try:
+                                    self.master_host = host
+                                    self.master_port = int(os.getenv('MASTER_PORT', str(self.master_port)))
+                                    logger.info(f"↪ Eleição: novo master anunciado {winner.get('WORKER_UUID')} em {host}")
+                                except Exception:
+                                    pass
+
+                except Exception:
+                    time.sleep(0.1)
+        except Exception:
+            logger.debug("UDP election listener terminated")
+
+    def _send_udp_broadcast(self, message: dict) -> None:
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            sock.sendto(json.dumps(message).encode('utf-8'), (ELECTION_BROADCAST_ADDR, ELECTION_PORT))
+            try:
+                sock.close()
+            except:
+                pass
+        except Exception:
+            pass
+
+    def _run_election(self, timeout: float = 1.0) -> dict:
+        """Run a UDP broadcast election and return chosen winner dict."""
+        reqid = str(time.time()) + '-' + self.worker_uuid
+        # Broadcast election_start with our candidate info
+        our_candidate = {
+            'WORKER_UUID': self.worker_uuid,
+            'HOST': self.peer_registry.get(self.worker_uuid, {}).get('HOST') or self.master_host,
+            'FREE_DISK_BYTES': self.get_free_disk_bytes(),
+            'SERVER_UUID': self.server_uuid,
+        }
+        start_msg = {'type': 'election_start', 'request_id': reqid, 'payload': our_candidate}
+        # Reset votes store for this reqid
+        with self._election_lock:
+            self._election_votes[reqid] = [our_candidate]
+
+        self._send_udp_broadcast(start_msg)
+
+        # Wait for votes
+        waited = 0.0
+        interval = 0.05
+        while waited < timeout:
+            time.sleep(interval)
+            waited += interval
+
+        # Collect votes
+        with self._election_lock:
+            votes = list(self._election_votes.get(reqid, []))
+
+        winner = compute_winner(votes)
+
+        # Announce winner
+        result_msg = {'type': 'election_result', 'request_id': reqid, 'payload': {'winner': winner}}
+        self._send_udp_broadcast(result_msg)
+
+        # Apply winner locally
+        if winner.get('WORKER_UUID') == self.worker_uuid:
+            # Promote self
+            return winner
+        else:
+            return winner
 
     def start_promoted_master(self) -> None:
         """Sobe um Master local usando o server_uuid original."""
@@ -216,14 +349,18 @@ class WorkerClient:
         if self.master_failure_count < PROMOTE_THRESHOLD:
             return False
 
-        winner = self.choose_election_winner()
+        logger.warning(f"Eleição disparada após {self.master_failure_count} falhas. Iniciando protocolo de eleição UDP...")
+
+        # Run networked election
+        try:
+            winner = self._run_election(timeout=1.0)
+        except Exception as exc:
+            logger.warning(f"Falha no protocolo de eleição: {exc}")
+            winner = self.choose_election_winner()
+
         winner_uuid = winner.get("WORKER_UUID")
         winner_host = winner.get("HOST") or self.master_host
-
-        logger.warning(
-            f"Eleição disparada após {self.master_failure_count} falhas. "
-            f"Vencedor: {winner_uuid} ({winner.get('FREE_DISK_BYTES', 0)} bytes livres)"
-        )
+        logger.warning(f"Eleição concluída. Vencedor: {winner_uuid} ({winner.get('FREE_DISK_BYTES', 0)} bytes livres)")
 
         if winner_uuid == self.worker_uuid:
             self.start_promoted_master()
