@@ -159,6 +159,30 @@ class TaskManager:
 
             return task
 
+    def create_task_from_user(self, user: str) -> Task:
+        """Cria nova tarefa a partir do payload externo `USER`.
+
+        Este método mantém compatibilidade com o contrato de rede onde o
+        master envia somente `USER`. Internamente a tarefa conterá o
+        campo `user` e os campos ricos (`operation`/`values`) podem ser
+        populados por um parser interno posteriormente.
+        """
+        with self.lock:
+            task = Task(operation="", values=[], user=user)
+            self.tasks[task.task_id] = task
+            self.pending_queue.put(task.task_id)
+
+            self._log_event(task.task_id, "created", details={
+                "user": user
+            })
+            try:
+                if self.persistence_server_uuid:
+                    self.save_state(self.persistence_server_uuid)
+            except Exception:
+                pass
+
+            return task
+
     # Trigger save hooks on state-changing operations
     
     def get_task(self, task_id: str) -> Optional[Task]:

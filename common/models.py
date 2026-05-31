@@ -34,6 +34,9 @@ class Task:
     task_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     operation: str = ""  # soma, multiplicacao, sleep
     values: List[Any] = field(default_factory=list)
+    # Campo externo (NETWORK): o payload recebido do master deve fornecer
+    # apenas o campo `user`. Internamente mantemos `operation`/`values`.
+    user: Optional[str] = None
     
     # Rastreamento
     status: TaskStatus = TaskStatus.PENDING
