@@ -9,7 +9,7 @@ import logging
 import time
 import json
 from typing import Optional, Dict
-from common.protocol import send_json, recv_json_line
+from common.protocol import send_json, recv_json_line, build_master_envelope, parse_master_envelope
 from common.task_manager import TaskManager
 from common.models import TaskStatus, WorkerStatus
 import uuid
@@ -274,18 +274,21 @@ class MasterServer:
         """
         Processa mensagens vindas de outros masters (REQUEST_HELP / RESPONSE_*)
         """
+        # Normalizar envelope (novo formato: type/request_id/payload)
+        env = parse_master_envelope(data)
+        mtype = env.get("type")
+        payload = env.get("payload") or {}
+
         # Autenticação entre masters (opcional)
         if MASTER_AUTH_TOKEN:
-            if data.get("AUTH_TOKEN") != MASTER_AUTH_TOKEN:
+            if payload.get("AUTH_TOKEN") != MASTER_AUTH_TOKEN:
                 logger.warning(f"Auth failed for master at {addr}")
-                return {"MASTER": "ERROR", "MESSAGE": "AUTH_FAILED"}
+                return build_master_envelope("error", {"message": "AUTH_FAILED"}, request_id=env.get("request_id"))
 
-        mtype = data.get("MASTER")
-
-        if mtype == "REQUEST_HELP":
+        if mtype == "request_help":
             # Outro master pede ajuda (emprestar workers / aceitar tarefas)
-            requested = data.get("REQUESTED", 0)
-            from_server = data.get("FROM_SERVER")
+            requested = payload.get("REQUESTED", 0)
+            from_server = payload.get("FROM_SERVER")
 
             stats = self.task_manager.get_statistics()
             current_load = stats["tasks"]["pending"] + stats["tasks"]["in_progress"]
@@ -296,62 +299,67 @@ class MasterServer:
 
             logger.info(f"Master request from {from_server}: requested={requested}, load={current_load}, accept={can_accept}")
 
-            return {
-                "MASTER": "RESPONSE_HELP",
-                "FROM_SERVER": self.server_uuid,
-                "ACCEPT": can_accept,
-                "AVAILABLE": max(0, threshold - current_load)
-            }
+            return build_master_envelope("response_help", {"FROM_SERVER": self.server_uuid, "ACCEPT": can_accept, "AVAILABLE": max(0, threshold - current_load)}, request_id=env.get("request_id"))
 
-        if mtype == "REQUEST_STATE":
+        if mtype == "request_state":
             # Outro master/worker solicita o estado salvo de um server_uuid
-            target = data.get("TARGET_SERVER")
+            target = payload.get("TARGET_SERVER") or payload.get("TARGET_SERVER")
             if not target:
-                return {"MASTER": "ERROR", "MESSAGE": "TARGET_SERVER faltando"}
+                return build_master_envelope("error", {"message": "TARGET_SERVER faltando"}, request_id=env.get("request_id"))
 
             # caminho do estado
             try:
                 path = self.task_manager._state_path(target)
                 if not path or not os.path.exists(path):
-                    return {"MASTER": "RESPONSE_STATE", "FOUND": False}
+                    return build_master_envelope("response_state", {"FOUND": False}, request_id=env.get("request_id"))
 
                 with open(path, 'r', encoding='utf-8') as f:
                     state = json.load(f)
 
-                return {"MASTER": "RESPONSE_STATE", "FOUND": True, "TARGET_SERVER": target, "STATE": state}
+                return build_master_envelope("response_state", {"FOUND": True, "TARGET_SERVER": target, "STATE": state}, request_id=env.get("request_id"))
 
             except Exception as exc:
                 logger.warning(f"Erro ao fornecer estado para {addr}: {exc}")
-                return {"MASTER": "ERROR", "MESSAGE": str(exc)}
+                return build_master_envelope("error", {"message": str(exc)}, request_id=env.get("request_id"))
 
         else:
             logger.warning(f"Mensagem MASTER desconhecida de {addr}: {data}")
-            return {"MASTER": "ERROR", "MESSAGE": "Tipo MASTER desconhecido"}
+            return build_master_envelope("error", {"message": "Tipo MASTER desconhecido"}, request_id=env.get("request_id"))
 
     def request_help_to_peer(self, peer_host: str, peer_port: int, requested: int = 1, timeout: int = 5) -> dict:
         """Envia uma solicitação de ajuda (REQUEST_HELP) a um peer master e devolve a resposta."""
         payload = {
-            "MASTER": "REQUEST_HELP",
-            "REQUEST_ID": str(uuid.uuid4()),
             "FROM_SERVER": self.server_uuid,
             "REQUESTED": requested,
             "LOAD": self.task_manager.get_statistics()
         }
+
+        envelope = build_master_envelope("request_help", payload)
 
         try:
             sock = socket.create_connection((peer_host, peer_port), timeout=timeout)
             sock.settimeout(timeout)
             sock_file = sock.makefile("r", encoding="utf-8")
 
-            send_json(sock, payload)
+            send_json(sock, envelope)
             response = recv_json_line(sock_file)
 
+            # Normalizar resposta para o novo envelope
+            if response:
+                # parse_master_envelope não é importado aqui; usar manual
+                if isinstance(response, dict) and response.get('type'):
+                    resp_payload = response.get('payload')
+                elif isinstance(response, dict) and response.get('MASTER'):
+                    resp_payload = response
+                else:
+                    resp_payload = response
+                return resp_payload or {}
             try:
                 sock.close()
             except:
                 pass
 
-            return response or {}
+            return {}
 
         except Exception as exc:
             logger.warning(f"Não foi possível contatar peer {peer_host}:{peer_port}: {exc}")
