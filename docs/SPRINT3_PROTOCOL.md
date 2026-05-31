@@ -12,23 +12,26 @@ Sent when a master is saturated and needs help from a peer farm.
 
 ```json
 {
-  "MASTER": "REQUEST_HELP",
-  "REQUEST_ID": "uuid-xxx",
-  "FROM_SERVER": "Master_A",
-  "REQUESTED": 1,
-  "LOAD": { "tasks": {...}, "workers": {...} },
-  "AUTH_TOKEN": "optional-secret"
+  "type": "request_help",
+  "request_id": "uuid-xxx",
+  "payload": {
+    "master_id": "Master_A",
+    "workers_needed": 1,
+    "current_load": { "tasks": {...}, "workers": {...} }
+  }
 }
 ```
 
-**Response:** `RESPONSE_HELP`
+**Response:** `response_accepted` or `response_rejected`
 
 ```json
 {
-  "MASTER": "RESPONSE_HELP",
-  "FROM_SERVER": "Master_B",
-  "ACCEPT": true,
-  "AVAILABLE": 10
+  "type": "response_accepted",
+  "request_id": "uuid-xxx",
+  "payload": {
+    "workers_offered": 2,
+    "worker_details": [ { "id": "B1", "address": "ip:port" } ]
+  }
 }
 ```
 
@@ -62,24 +65,26 @@ Requests persisted state of a specific server_uuid (used during worker promotion
 
 ```json
 {
-  "MASTER": "REQUEST_STATE",
-  "TARGET_SERVER": "Master_A",
-  "FROM_WORKER": "TestWorker_1",
-  "AUTH_TOKEN": "optional-secret"
+  "type": "request_state",
+  "request_id": "uuid-yyy",
+  "payload": { "target_server": "Master_A", "from_worker": "TestWorker_1" }
 }
 ```
 
-**Response:** `RESPONSE_STATE`
+**Response:** `response_state`
 
 ```json
 {
-  "MASTER": "RESPONSE_STATE",
-  "FOUND": true,
-  "TARGET_SERVER": "Master_A",
-  "STATE": {
-    "tasks": { "task-id": {...}, ... },
-    "workers": { "worker-uuid": {...}, ... },
-    "logs": [...]
+  "type": "response_state",
+  "request_id": "uuid-yyy",
+  "payload": {
+    "found": true,
+    "target_server": "Master_A",
+    "state": {
+      "tasks": { "task-id": {...}, ... },
+      "workers": { "worker-uuid": {...}, ... },
+      "logs": [...]
+    }
   }
 }
 ```

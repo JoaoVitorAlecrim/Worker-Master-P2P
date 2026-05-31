@@ -53,4 +53,8 @@ def parse_election_message_spec(data: Dict) -> Dict:
     if missing:
         return {"error": "MISSING_FIELDS", "missing": missing}
 
-    return {"type": str(data.get("ELECTION")).lower(), "request_id": data.get("REQUEST_ID"), "payload": data.get("PAYLOAD")}
+    return {
+        "type": str(data.get("ELECTION")).lower(),
+        "request_id": data.get("REQUEST_ID"),
+        "payload": data.get("PAYLOAD"),
+    }

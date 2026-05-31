@@ -191,7 +191,11 @@ class WorkerClient:
 
                     elif mtype in ("election_vote", "vote"):
                         # payload may contain CANDIDATE key or be the candidate itself
-                        candidate = payload.get("CANDIDATE") if isinstance(payload, dict) and payload.get("CANDIDATE") else payload
+                        candidate = (
+                            payload.get("CANDIDATE")
+                            if isinstance(payload, dict) and payload.get("CANDIDATE")
+                            else payload
+                        )
                         with self._election_lock:
                             votes = self._election_votes.setdefault(reqid, [])
                             votes.append(candidate)
@@ -304,24 +308,33 @@ class WorkerClient:
                     sock = socket.create_connection((h, p), timeout=5)
                     sock.settimeout(5)
                     sf = sock.makefile("r", encoding="utf-8")
-                    req = {
-                        "MASTER": "REQUEST_STATE",
-                        "TARGET_SERVER": promoted_server_uuid,
-                        "FROM_WORKER": self.worker_uuid,
-                    }
-                    if self.auth_token:
-                        req["AUTH_TOKEN"] = self.auth_token
-                    from common.protocol import send_json, recv_json_line
+                    from common.protocol import (
+                        send_json,
+                        recv_json_line,
+                        build_master_envelope_spec,
+                        parse_master_envelope_spec,
+                    )
 
-                    send_json(sock, req)
+                    req_payload = {"target_server": promoted_server_uuid, "from_worker": self.worker_uuid}
+                    if self.auth_token:
+                        req_payload["auth_token"] = self.auth_token
+
+                    envelope = build_master_envelope_spec("request_state", req_payload)
+                    send_json(sock, envelope)
                     resp = recv_json_line(sf)
                     try:
                         sock.close()
                     except Exception:
                         pass
 
-                    if resp and resp.get("MASTER") == "RESPONSE_STATE" and resp.get("FOUND"):
-                        state = resp.get("STATE")
+                    parsed = None
+                    if resp and isinstance(resp, dict):
+                        parsed = parse_master_envelope_spec(resp)
+
+                    if parsed and parsed.get("type") == "response_state":
+                        payload = parsed.get("payload") or {}
+                        if payload.get("found") or payload.get("FOUND"):
+                            state = payload.get("state") or payload.get("STATE")
                         if state:
                             logger.info(f"Estado recebido de peer {h}:{p}, carregando...")
                             server.task_manager.load_state_dict(state)

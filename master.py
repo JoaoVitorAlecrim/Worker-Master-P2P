@@ -155,16 +155,21 @@ class MasterServer:
                 except Exception:
                     continue
 
+                # Request help using PDF envelope: type/request_id/payload
                 resp = self.request_help_to_peer(peer_host, peer_port, requested=1)
 
-                if resp and resp.get("MASTER") == "RESPONSE_HELP" and resp.get("ACCEPT"):
-                    logger.debug(f"Redirecionando para {peer_uuid}")
-                    return {
-                        "TASK": "REDIRECT",
-                        "TARGET_HOST": peer_host,
-                        "TARGET_PORT": peer_port,
-                        "TARGET_SERVER_UUID": peer_uuid,
-                    }
+                # resp is normalized: {"type": ..., "request_id": ..., "payload": {...}}
+                if resp and resp.get("type") == "response_accepted":
+                    payload = resp.get("payload") or {}
+                    # If peer accepted and offered workers, redirect
+                    if payload.get("workers_offered", 0) > 0:
+                        logger.debug(f"Redirecionando para {peer_uuid}")
+                        return {
+                            "TASK": "REDIRECT",
+                            "TARGET_HOST": peer_host,
+                            "TARGET_PORT": peer_port,
+                            "TARGET_SERVER_UUID": peer_uuid,
+                        }
 
             return {"TASK": "NO_TASK"}
 
@@ -276,13 +281,13 @@ class MasterServer:
 
         if mtype == "request_help":
             # Outro master pede ajuda (emprestar workers / aceitar tarefas)
-            requested = payload.get("REQUESTED", 0)
-            from_server = payload.get("FROM_SERVER")
+            requested = payload.get("workers_needed", 0)
+            from_server = payload.get("master_id") or payload.get("from_server")
 
             stats = self.task_manager.get_statistics()
             current_load = stats["tasks"]["pending"] + stats["tasks"]["in_progress"]
 
-            # Simples política: aceitar se carga atual < 70% da capacidade
+            # Simples política: aceitar se carga atual + requested <= 70% da capacidade
             threshold = int(CAPACITY * 0.7)
             can_accept = current_load + requested <= threshold
 
@@ -290,11 +295,20 @@ class MasterServer:
                 f"Master request from {from_server}: requested={requested}, load={current_load}, accept={can_accept}"
             )
 
-            return build_master_envelope(
-                "response_help",
-                {"FROM_SERVER": self.server_uuid, "ACCEPT": can_accept, "AVAILABLE": max(0, threshold - current_load)},
-                request_id=env.get("request_id"),
-            )
+            if can_accept:
+                # Offer workers (simplified: offer up to requested)
+                offer = min(requested, max(0, threshold - current_load))
+                return build_master_envelope_spec(
+                    "response_accepted",
+                    {"workers_offered": offer, "worker_details": []},
+                    request_id=env.get("request_id"),
+                )
+            else:
+                return build_master_envelope_spec(
+                    "response_rejected",
+                    {"reason": "high_load"},
+                    request_id=env.get("request_id"),
+                )
 
         if mtype == "request_state":
             # Outro master/worker solicita o estado salvo de um server_uuid
@@ -331,7 +345,11 @@ class MasterServer:
 
     def request_help_to_peer(self, peer_host: str, peer_port: int, requested: int = 1, timeout: int = 5) -> dict:
         """Envia uma solicitação de ajuda (REQUEST_HELP) a um peer master e devolve a resposta."""
-        payload = {"FROM_SERVER": self.server_uuid, "REQUESTED": requested, "LOAD": self.task_manager.get_statistics()}
+        payload = {
+            "master_id": self.server_uuid,
+            "workers_needed": requested,
+            "current_load": self.task_manager.get_statistics(),
+        }
 
         envelope = build_master_envelope_spec("request_help", payload)
 
@@ -343,16 +361,21 @@ class MasterServer:
             send_json(sock, envelope)
             response = recv_json_line(sock_file)
 
-            # Normalizar resposta para o novo envelope
-            if response:
-                # parse_master_envelope não é importado aqui; usar manual
-                if isinstance(response, dict) and response.get("type"):
-                    resp_payload = response.get("payload")
-                elif isinstance(response, dict) and response.get("MASTER"):
-                    resp_payload = response
-                else:
-                    resp_payload = response
-                return resp_payload or {}
+            # Parse normalized envelope (prefer spec parser)
+            if response and isinstance(response, dict):
+                parsed = None
+                try:
+                    parsed = parse_master_envelope_spec(response)
+                except Exception:
+                    parsed = parse_master_envelope(response)
+
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+
+                return parsed or {}
+
             try:
                 sock.close()
             except Exception:
@@ -362,7 +385,7 @@ class MasterServer:
 
         except Exception as exc:
             logger.warning(f"Não foi possível contatar peer {peer_host}:{peer_port}: {exc}")
-            return {"MASTER": "ERROR", "MESSAGE": str(exc)}
+            return {"type": "error", "message": str(exc)}
 
     # ============ GERENCIAMENTO DE CONEXÃO ============
 
@@ -434,14 +457,16 @@ class MasterServer:
 
                         resp = self.request_help_to_peer(peer_host, peer_port, requested=1)
 
-                        if resp and resp.get("MASTER") == "RESPONSE_HELP" and resp.get("ACCEPT"):
-                            logger.debug(f"Redirecionando para {peer_uuid}")
-                            return {
-                                "TASK": "REDIRECT",
-                                "TARGET_HOST": peer_host,
-                                "TARGET_PORT": peer_port,
-                                "TARGET_SERVER_UUID": peer_uuid,
-                            }
+                        if resp and resp.get("type") == "response_accepted":
+                            payload = resp.get("payload") or {}
+                            if payload.get("workers_offered", 0) > 0:
+                                logger.debug(f"Redirecionando para {peer_uuid}")
+                                return {
+                                    "TASK": "REDIRECT",
+                                    "TARGET_HOST": peer_host,
+                                    "TARGET_PORT": peer_port,
+                                    "TARGET_SERVER_UUID": peer_uuid,
+                                }
 
                     return {"TASK": "NO_TASK"}
 

@@ -59,17 +59,17 @@ TCP: Worker <-> Master
 Master <-> Master (TCP envelope)
 --------------------------------
 
-This repository supports two envelope formats; the preferred (and tested) PDF-style spec is exact:
+The repository prefers the PDF-style envelope and the code emits/parses messages using these exact keys:
 
 Spec envelope (exact keys):
 
   {
-    "MASTER": "REQUEST_HELP",   # uppercase type name
-    "REQUEST_ID": "...",
-    "PAYLOAD": { ... }
+    "type": "request_help",
+    "request_id": "...",
+    "payload": { ... }
   }
 
-Parsing is strict: missing `MASTER`, `REQUEST_ID`, or `PAYLOAD` will be reported as an error by the parser used by `master.py`.
+Parsing is strict: missing `type`, `request_id`, or `payload` will be reported as an error by the parser used by `master.py`.
 
 
 UDP election messages

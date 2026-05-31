@@ -61,18 +61,12 @@ def recv_json_line(sock_file) -> Optional[Dict[str, Any]]:
 
 
 def build_master_envelope_spec(mtype: str, payload: Dict[str, Any], request_id: Optional[str] = None) -> Dict[str, Any]:
-    """Builds a master↔master envelope using the PDF-style spec keys.
+    """Builds a master↔master envelope using the PDF-style keys.
 
-    Spec format (exact keys):
-    {
-        "MASTER": "REQUEST_HELP",   # uppercase type name
-        "REQUEST_ID": "...",
-        "PAYLOAD": { ... }
-    }
-
-    This function does not mutate `payload` and keeps payload keys as-is.
+    The PDF examples use the lowercase envelope: {"type": ..., "request_id": ..., "payload": {...}}
+    This function returns that exact shape and keeps payload keys as-is.
     """
-    return {"MASTER": str(mtype).upper(), "REQUEST_ID": request_id or str(uuid.uuid4()), "PAYLOAD": payload}
+    return {"type": str(mtype).lower(), "request_id": request_id or str(uuid.uuid4()), "payload": payload}
 
 
 def parse_master_envelope_spec(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -88,18 +82,36 @@ def parse_master_envelope_spec(data: Dict[str, Any]) -> Dict[str, Any]:
         return {"error": "INVALID_FORMAT", "message": "envelope must be an object"}
 
     missing = []
-    if "MASTER" not in data:
-        missing.append("MASTER")
-    if "REQUEST_ID" not in data:
-        missing.append("REQUEST_ID")
-    if "PAYLOAD" not in data:
-        missing.append("PAYLOAD")
+    if "type" not in data:
+        missing.append("type")
+    if "request_id" not in data:
+        missing.append("request_id")
+    if "payload" not in data:
+        missing.append("payload")
+
+    # Backwards compatibility: if caller sent the legacy UPPER keys, accept them
+    if missing and isinstance(data, dict):
+        # map legacy keys if present
+        legacy_map = {}
+        if "MASTER" in data:
+            legacy_map["type"] = str(data.get("MASTER")).lower()
+        if "REQUEST_ID" in data:
+            legacy_map["request_id"] = data.get("REQUEST_ID")
+        if "PAYLOAD" in data:
+            legacy_map["payload"] = data.get("PAYLOAD")
+
+        if legacy_map:
+            # fill defaults from legacy_map and any missing keys
+            mtype = legacy_map.get("type")
+            rid = legacy_map.get("request_id")
+            payload = legacy_map.get("payload")
+            return {"type": mtype, "request_id": rid, "payload": payload}
 
     if missing:
         return {"error": "MISSING_FIELDS", "missing": missing}
 
-    mtype = str(data.get("MASTER"))
-    rid = data.get("REQUEST_ID")
-    payload = data.get("PAYLOAD")
+    mtype = str(data.get("type"))
+    rid = data.get("request_id")
+    payload = data.get("payload")
 
     return {"type": mtype.lower(), "request_id": rid, "payload": payload}
