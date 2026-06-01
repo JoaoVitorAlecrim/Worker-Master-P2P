@@ -113,6 +113,8 @@ class Worker:
 
     worker_uuid: str  # UUID único do worker
     server_uuid: str  # Master que o worker pertence originalmente
+    original_master_address: Optional[str] = None  # Endereço do master de origem quando emprestado
+    is_temporary: bool = False  # Indica worker emprestado por outro master
     host: Optional[str] = None  # Endereço observado pelo master
     free_disk_bytes: Optional[int] = None  # Espaço livre em disco
     status: WorkerStatus = WorkerStatus.OFFLINE

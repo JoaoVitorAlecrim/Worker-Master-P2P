@@ -2,7 +2,7 @@
 
 ## Overview
 
-Sprint 3 implements **Farm-to-Farm Negotiation**, **Dynamic Worker Redirection**, and **Automatic Worker Promotion**.
+Sprint 3 is implemented and covers **Farm-to-Farm Negotiation**, **Dynamic Worker Redirection**, **Automatic Worker Promotion**, and **Worker Return Notification**.
 
 ## Messages
 
@@ -59,6 +59,27 @@ Instructs a worker to reconnect to a different master (load balancing / help sce
 
 ---
 
+### Worker-to-Master: REGISTER_TEMPORARY_WORKER
+
+Sent immediately after reconnecting to the borrowed master.
+
+```json
+{
+  "type": "register_temporary_worker",
+  "request_id": "uuid-rrr",
+  "payload": {
+    "worker_id": "B1",
+    "original_master_address": "ip_master_B:port"
+  }
+}
+```
+
+**Response:** `response_accepted` or `response_rejected`
+
+**Usage:** Announces that the worker is temporary and should now follow the Sprint 2 cycle under the new master.
+
+---
+
 ### Master-to-Master: REQUEST_STATE
 
 Requests persisted state of a specific server_uuid (used during worker promotion).
@@ -92,12 +113,37 @@ Requests persisted state of a specific server_uuid (used during worker promotion
 If not found:
 ```json
 {
-  "MASTER": "RESPONSE_STATE",
-  "FOUND": false
+  "type": "response_state",
+  "request_id": "uuid-yyy",
+  "payload": {
+    "found": false,
+    "target_server": "Master_A"
+  }
 }
 ```
 
 **Usage:** When a worker promotes itself to master, it queries peer masters for saved state of its original `server_uuid` and loads it into the new master.
+
+---
+
+### Master-to-Master: NOTIFY_WORKER_RETURNED
+
+Notifies the borrowed master that the worker is returning to its original master.
+
+```json
+{
+  "type": "notify_worker_returned",
+  "request_id": "uuid-zzz",
+  "payload": {
+    "worker_id": "Worker_1",
+    "original_server_uuid": "Master_A"
+  }
+}
+```
+
+**Response:** `response_accepted`
+
+**Usage:** Sent by the worker right before `command_release` completes.
 
 ---
 
@@ -145,7 +191,7 @@ data/
 
 **Load triggers:**
 - On master startup (if file exists and no tasks are in memory)
-- On worker promotion (queries peers via REQUEST_STATE, then loads state_dict)
+- On worker promotion (queries peers via `request_state`, then loads state_dict)
 
 ---
 
@@ -155,7 +201,7 @@ When a worker fails to connect `PROMOTE_THRESHOLD` times:
 
 1. Worker starts `MasterServer` using its original `server_uuid` (e.g., "Master_A")
 2. Master sets persistence and attempts to load saved state from disk
-3. If no disk state, queries `MASTER_PEERS` for `REQUEST_STATE` of original `server_uuid`
+3. If no disk state, queries `MASTER_PEERS` for `request_state` of original `server_uuid`
 4. If peer responds with state, loads it via `load_state_dict()`
 5. Master now owns the task queue and can accept new workers
 
@@ -171,11 +217,12 @@ When a worker fails to connect `PROMOTE_THRESHOLD` times:
 When a master has no local tasks and a peer accepts help:
 
 1. Master receives `WORKER: ALIVE` request with no pending tasks
-2. Queries `MASTER_PEERS` via `REQUEST_HELP`
+2. Queries `MASTER_PEERS` via `request_help`
 3. Peer responds with `ACCEPT: true`
 4. Master sends `REDIRECT` to worker pointing to peer master
 5. Worker breaks connection and reconnects to peer
 6. Peer master now handles the worker's tasks
+7. When release/failback occurs, worker sends `notify_worker_returned` and then `command_release` is applied to restore the original master target
 
 **Example:** Master_A saturated → sends REDIRECT to Worker_1 → Worker_1 reconnects to Master_B (5101) → Master_B assigns tasks.
 
@@ -235,7 +282,7 @@ MASTER_PORT=5000 MASTER_PEERS=127.0.0.1:5101:Master_B python worker.py Worker_1
 
 # Kill Master_A and Worker's master connection
 # [Worker fails to reconnect, promotes to Master_A]
-# [Promoted worker queries Master_B via REQUEST_STATE for Master_A state]
+# [Promoted worker queries Master_B via request_state for Master_A state]
 # [Master_B responds with saved state from data/tasks_Master_A.json]
 # [Promoted Master_A loads state and continues task distribution]
 ```
@@ -299,7 +346,7 @@ Farm A (Master_A)          Farm B (Master_B)
 ## Security Notes
 
 - Optional `MASTER_AUTH_TOKEN` / `AUTH_TOKEN` for message authentication
-- Auth checks on `WORKER: ALIVE`, `MASTER: REQUEST_HELP`, `MASTER: REQUEST_STATE`
+- Auth checks on `WORKER: ALIVE`, `request_help`, `request_state`
 - No encryption by default (lab environment; can add TLS if needed)
 
 ---

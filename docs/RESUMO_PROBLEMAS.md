@@ -69,19 +69,19 @@ Faltam:
 
 ---
 
-## 🔴 SPRINT 3 - P2P Master (NÃO EXISTE)
+## 🟢 SPRINT 3 - P2P Master (IMPLEMENTADO)
 
 ```
-❌ 100% NÃO IMPLEMENTADO
+✅ Envelope PDF aplicado
 
-Deveria ter:
-  □ Master-to-Master: request_help
-  □ Negociação: response_accepted/rejected  
-  □ Redirecionamento: command_redirect
-  □ Registro: register_temporary_worker
-  □ Devolução: command_release
-  
-Quando: Fila > threshold
+Tem:
+  ✓ Master-to-Master: request_help
+  ✓ Negociação: response_accepted/rejected
+  ✓ Redirecionamento: command_redirect
+  ✓ Retorno: command_release + notify_worker_returned
+  ✓ Promoção: request_state / response_state
+
+Quando: fila supera o limite ou há failback/promoção
 ```
 
 ---

@@ -49,7 +49,7 @@
 
 6. **[SPRINT3_PROTOCOL.md](SPRINT3_PROTOCOL.md)**
    - Protocolo completo de negociação entre farms
-   - Mensagens: REQUEST_HELP, REDIRECT, REQUEST_STATE
+   - Mensagens: request_help, response_accepted, response_rejected, command_redirect, register_temporary_worker, request_state, command_release, notify_worker_returned
    - Variáveis de ambiente (MASTER_PEERS, INITIAL_TASKS, etc)
    - Fluxo de promoção automática do worker
    - Persistência de estado
@@ -99,7 +99,7 @@
 
 ### Sprint 3 (Farm-to-Farm Extension)
 ```
-✅ Farm Negotiation (REQUEST_HELP/RESPONSE_HELP)  [IMPLEMENTADO]
+✅ Farm Negotiation (request_help/response_accepted)  [IMPLEMENTADO]
 ✅ Worker Redirection (REDIRECT message)           [IMPLEMENTADO]
 ✅ Auto-Promotion (failed worker → master)        [IMPLEMENTADO]
 ✅ State Handoff (load peer state on promotion)   [IMPLEMENTADO]
@@ -185,7 +185,7 @@ python worker.py Worker_2 Master_A
 ### Protocolo
 - [RESUMO_PROBLEMAS.md](RESUMO_PROBLEMAS.md) - Sprint 1, 2 protocol overview
 - [TESTE_GUIDE.md](TESTE_GUIDE.md) - "Protocolo Implementado" section (Sprints 1-2)
-- [SPRINT3_PROTOCOL.md](SPRINT3_PROTOCOL.md) - Sprint 3 protocol (REQUEST_HELP, REDIRECT, REQUEST_STATE)
+- [SPRINT3_PROTOCOL.md](SPRINT3_PROTOCOL.md) - Sprint 3 protocol (request_help, command_redirect, request_state)
 
 ### Task Tracking
 - [PLANO_IMPLEMENTACAO.md](PLANO_IMPLEMENTACAO.md) - Fase 2: Rastreamento de Tarefas

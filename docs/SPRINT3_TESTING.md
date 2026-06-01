@@ -165,7 +165,7 @@ MASTER_PORT=5000 MASTER_PEERS=127.0.0.1:5101:Master_B PROMOTE_THRESHOLD=2 RECONN
 
 **Verdict:** ✓ PASS if "Estado recebido de peer" is logged and master continues task distribution with restored state.
 
-> Note: the promoted worker first starts the local master, then attempts to hydrate it from peers using `REQUEST_STATE`.
+> Note: the promoted worker first starts the local master, then attempts to hydrate it from peers using `request_state`.
 
 ---
 

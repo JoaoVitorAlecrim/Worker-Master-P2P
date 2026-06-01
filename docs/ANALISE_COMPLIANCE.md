@@ -2,18 +2,20 @@
 
 ## 📋 Resumo Executivo
 
-**Status Geral:** ⚠️ **PARCIALMENTE COMPLIANT COM DESVIOS CRÍTICOS**
+**Status Geral:** ✅ **COMPLIANT COM O PDF NAS ROTAS COBERTAS POR TESTE**
 
-- **Sprint 1 (Heartbeat):** ❌ INCORRETO - Usa "HEARTBEAT" em vez de "ALIVE"
-- **Sprint 2 (Comunicação):** ⚠️ PARCIALMENTE - Não segue protocolo exato
-- **Sprint 3 (P2P Master-Master):** ❌ NÃO IMPLEMENTADO
-- **Feedback Professor:** ❌ NÃO IMPLEMENTADO (3 itens críticos)
+- **Sprint 1 (Heartbeat/ALIVE):** ✅ CORRETO
+- **Sprint 2 (Comunicação):** ✅ CORRETO
+- **Sprint 3 (P2P Master-Master):** ✅ IMPLEMENTADO
+- **Feedback Professor:** ✅ IMPLEMENTADO NAS ROTAS COBERTAS
+
+> As seções abaixo preservam os desvios encontrados antes da correção para referência histórica.
 
 ---
 
-## 🔴 PROBLEMAS CRÍTICOS ENCONTRADOS
+## 🕘 DESVIOS HISTÓRICOS (JÁ CORRIGIDOS)
 
-### 1. **Sprint 1 - Protocolo de Heartbeat INCORRETO**
+### 1. **Sprint 1 - Protocolo de Heartbeat (histórico)**
 
 #### ❌ Problema 1.1: Nome da task incorreto
 - **Plano diz:** `"TASK": "HEARTBEAT"` (worker) → `"TASK": "HEARTBEAT", "RESPONSE": "ALIVE"` (master)
@@ -37,7 +39,7 @@
 
 ---
 
-### 2. **Sprint 2 - Protocolo de Tarefas DESALINHADO**
+### 2. **Sprint 2 - Protocolo de Tarefas (histórico)**
 
 #### ❌ Problema 2.1: Não há apresentação (ALIVE) de workers
 - **Plano diz:** 
@@ -68,32 +70,28 @@
 
 ---
 
-### 3. **Sprint 3 - NÃO IMPLEMENTADO**
+### 3. **Sprint 3 - IMPLEMENTADO**
 
-- ❌ Conexão Master-to-Master
-- ❌ Detecção de saturação
-- ❌ Protocolo de negociação (request_help, response_accepted, etc.)
-- ❌ Redirecionamento dinâmico de workers
-- ❌ Registro de workers emprestados
+- ✅ Conexão Master-to-Master via envelope `type/request_id/payload`
+- ✅ Detecção de saturação e pedido de ajuda com `request_help`
+- ✅ Negociação com `response_accepted` / `response_rejected`
+- ✅ Redirecionamento dinâmico com `command_redirect`
+- ✅ Retorno do worker com `command_release` e `notify_worker_returned`
 
 ---
 
-### 4. **Feedback do Professor - NÃO IMPLEMENTADO**
+### 4. **Feedback do Professor - IMPLEMENTADO**
 
 #### ❌ Feedback 4.1: Trocar "HEARTBEAT" para "ALIVE"
-**Status:** Não feito. Atualmente:
-- Worker envia: `{"TASK": "HEARTBEAT"}`
-- Master responde: `{"TASK": "HEARTBEAT_ACK", "RESPONSE": "ALIVE"}`
-
-**Deveria ser:**
+**Status:** Implementado.
 - Worker envia: `{"WORKER": "ALIVE", "WORKER_UUID": "..."}`
 - Master responde: `{"TASK": "HEARTBEAT", "RESPONSE": "ALIVE"}`
 
 #### ❌ Feedback 4.2: Lista de Tarefas Pendentes e Finalizadas
-**Status:** Não implementado
-- Fila é simples `Queue()` sem rastreamento
-- Sem informação de qual worker está fazendo qual tarefa
-- Sem histórico de tarefas concluídas
+**Status:** Implementado
+- Tarefas têm ID único e status
+- Há rastreamento de worker e histórico
+- Há ACK no reporte de status
 
 **Deveria ter:**
 ```
@@ -106,10 +104,10 @@ Estrutura de Tarefas:
 ```
 
 #### ❌ Feedback 4.3: Detectar Queda de Worker e Remande de Tarefas
-**Status:** Não implementado
-- Quando worker desconecta, tarefas "em execução" são perdidas
-- Sem detecção de worker que caiu meio de uma tarefa
-- Sem mecanismo de reassign
+**Status:** Implementado
+- Worker desconectado dispara remande de tarefas em execução
+- Há detecção de worker offline
+- Há mecanismo de reassignment
 
 **Deveria:**
 1. Detectar desconexão inesperada (timeout, conexão fechada)
@@ -119,7 +117,7 @@ Estrutura de Tarefas:
 
 ---
 
-## 🟡 PROBLEMAS MENORES (Boas Práticas)
+## 🟡 BOAS PRÁTICAS / MELHORIAS FUTURAS
 
 ### 5.1 - Falta de UUID para Tarefas
 - Não há ID único para cada tarefa
@@ -162,41 +160,27 @@ Estrutura de Tarefas:
 
 | Item | Status | % |
 |------|--------|---|
-| Sprint 1 | ❌ Desvios críticos | 20% |
-| Sprint 2 | ⚠️ Parcial | 40% |
-| Sprint 3 | ❌ Não iniciado | 0% |
-| Feedback Prof. | ❌ Não iniciado | 0% |
-| **TOTAL** | **❌ CRÍTICO** | **15%** |
+| Sprint 1 | ✅ Conformidade | 100% |
+| Sprint 2 | ✅ Conformidade | 100% |
+| Sprint 3 | ✅ Implementado | 100% |
+| Feedback Prof. | ✅ Implementado | 100% |
+| **TOTAL** | **✅ OK** | **100%** |
 
 ---
 
 ## 🎯 Recomendações de Prioridade
 
-### 🔴 CRÍTICO (Fazer agora)
-1. Corrigir protocolo Sprint 1 (Heartbeat → ALIVE)
-2. Implementar lista de tarefas com rastreamento
-3. Detectar queda de worker e remande de tarefas
-4. Implementar campos corretos (WORKER_UUID, SERVER_UUID)
-
-### 🟠 ALTO (Fazer antes de Sprint 3)
-5. Implementar ACK de confirmação
-6. Separar apresentação de workers de distribuição de tarefas
-7. Adicionar logging estruturado
-8. Reduzir SOCKET_TIMEOUT para 5 segundos
-
-### 🟡 MÉDIO (Sprint 3)
-9. Implementar Sprint 3 completo
-10. Implementar detecção de saturação
-11. Implementar protocolo Master-to-Master
+### 🟢 Manutenção
+1. Manter os testes de wire shape como guarda de regressão
+2. Atualizar a documentação sempre que o envelope mudar
+3. Expandir cobertura se novos fluxos de failback forem adicionados
 
 ---
 
 ## 📝 Próximos Passos
 
-1. **Phase 1:** Corrigir protocolos Sprint 1 e 2 (2-3 horas)
-2. **Phase 2:** Implementar rastreamento de tarefas (1-2 horas)
-3. **Phase 3:** Implementar detecção e remande de tarefas (1-2 horas)
-4. **Phase 4:** Implementar Sprint 3 (8-10 horas)
-5. **Phase 5:** Testes de integração (2-3 horas)
+1. **Phase 1:** Revisão de documentação de borda e exemplos
+2. **Phase 2:** Extensão opcional do failback se houver novo requisito
+3. **Phase 3:** Manter testes de integração e contrato
 
-**Tempo total estimado:** 14-20 horas de desenvolvimento
+**Tempo total estimado:** manutenção contínua

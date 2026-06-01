@@ -352,12 +352,47 @@ class TaskManager:
                 self.workers[worker_uuid] = worker
 
             worker = self.workers[worker_uuid]
+            worker.server_uuid = server_uuid
+            worker.is_temporary = worker.is_temporary and worker.original_master_address is not None
             if host is not None:
                 worker.host = host
             if free_disk_bytes is not None:
                 worker.free_disk_bytes = free_disk_bytes
             worker.mark_online()
             worker.update_heartbeat()
+            try:
+                if self.persistence_server_uuid:
+                    self.save_state(self.persistence_server_uuid)
+            except Exception:
+                pass
+
+            return worker
+
+    def register_temporary_worker(
+        self,
+        worker_uuid: str,
+        original_master_address: str,
+        current_master_uuid: str,
+        host: Optional[str] = None,
+        free_disk_bytes: Optional[int] = None,
+    ) -> Worker:
+        """Registra um worker emprestado por outro master."""
+        with self.lock:
+            if worker_uuid not in self.workers:
+                worker = Worker(worker_uuid=worker_uuid, server_uuid=current_master_uuid)
+                self.workers[worker_uuid] = worker
+
+            worker = self.workers[worker_uuid]
+            worker.server_uuid = current_master_uuid
+            worker.original_master_address = original_master_address
+            worker.is_temporary = True
+            if host is not None:
+                worker.host = host
+            if free_disk_bytes is not None:
+                worker.free_disk_bytes = free_disk_bytes
+            worker.mark_online()
+            worker.update_heartbeat()
+
             try:
                 if self.persistence_server_uuid:
                     self.save_state(self.persistence_server_uuid)
@@ -414,6 +449,8 @@ class TaskManager:
                             "FREE_DISK_BYTES": worker.free_disk_bytes,
                             "STATUS": worker.status.value,
                             "CURRENT_TASK_ID": worker.current_task_id,
+                            "IS_TEMPORARY": worker.is_temporary,
+                            "ORIGINAL_MASTER_ADDRESS": worker.original_master_address,
                         }
                     )
             return snapshot
