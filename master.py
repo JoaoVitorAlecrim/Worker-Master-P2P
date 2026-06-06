@@ -31,6 +31,12 @@ HELP_REQUEST_COOLDOWN = float(os.getenv("HELP_REQUEST_COOLDOWN", "5"))  # second
 # "host:port:uuid,host2:port2:uuid2"
 PEER_MASTERS = []
 logger = logging.getLogger(__name__)
+
+
+def _ci(data: dict, key: str, default=None):
+    from common.protocol import get_ci_value
+
+    return get_ci_value(data, key, default)
 peers_env = os.getenv("MASTER_PEERS")
 if peers_env:
     for part in peers_env.split(','):
@@ -102,12 +108,12 @@ class MasterServer:
             "SERVER_UUID": "Master_A"  # opcional, se emprestado
         }
         """
-        worker_uuid = data.get("WORKER_UUID")
-        original_master = data.get("SERVER_UUID", self.server_uuid)
-        free_disk_bytes = data.get("FREE_DISK_BYTES")
+        worker_uuid = _ci(data, "WORKER_UUID")
+        original_master = _ci(data, "SERVER_UUID", self.server_uuid)
+        free_disk_bytes = _ci(data, "FREE_DISK_BYTES")
         # Autenticação (opcional)
         if MASTER_AUTH_TOKEN:
-            if data.get("AUTH_TOKEN") != MASTER_AUTH_TOKEN:
+            if _ci(data, "AUTH_TOKEN") != MASTER_AUTH_TOKEN:
                 logger.warning(f"Auth failed for worker at {worker_addr}")
                 return {"TASK": "ERROR", "MESSAGE": "AUTH_FAILED"}
         
@@ -141,14 +147,14 @@ class MasterServer:
 
     def handle_temporary_worker_registration(self, data: dict, worker_addr: tuple) -> dict:
         """Registra worker emprestado após command_redirect."""
-        request_id = data.get("request_id")
-        payload = data.get("payload") or {}
-        worker_uuid = payload.get("worker_id")
-        original_master_address = payload.get("original_master_address")
-        free_disk_bytes = payload.get("FREE_DISK_BYTES")
+        request_id = _ci(data, "request_id")
+        payload = _ci(data, "payload") or {}
+        worker_uuid = _ci(payload, "worker_id")
+        original_master_address = _ci(payload, "original_master_address")
+        free_disk_bytes = _ci(payload, "FREE_DISK_BYTES")
 
         if MASTER_AUTH_TOKEN:
-            if data.get("AUTH_TOKEN") != MASTER_AUTH_TOKEN:
+            if _ci(data, "AUTH_TOKEN") != MASTER_AUTH_TOKEN:
                 logger.warning(f"Auth failed for temporary worker at {worker_addr}")
                 return build_master_envelope_spec("response_rejected", {"reason": "auth_failed"}, request_id=request_id)
 
@@ -194,7 +200,7 @@ class MasterServer:
             "SERVER_UUID": "Master_A"  # opcional
         }
         """
-        worker_uuid = data.get("WORKER_UUID")
+        worker_uuid = _ci(data, "WORKER_UUID")
         
         if not worker_uuid:
             return {
@@ -295,9 +301,9 @@ class MasterServer:
             "WORKER_UUID": "Worker_1",
         }
         """
-        task_name = data.get("TASK")
-        worker_uuid = data.get("WORKER_UUID")
-        status = data.get("STATUS")
+        task_name = _ci(data, "TASK")
+        worker_uuid = _ci(data, "WORKER_UUID")
+        status = _ci(data, "STATUS")
         task_id = None
         if worker_uuid:
             task_id = self.task_manager.worker_tasks.get(worker_uuid)
@@ -341,10 +347,10 @@ class MasterServer:
 
         if parsed.get("error"):
             # Compatibilidade transitória com o formato legado.
-            mtype = data.get("MASTER")
+            mtype = str(_ci(data, "MASTER") or "")
 
             if MASTER_AUTH_TOKEN:
-                if data.get("AUTH_TOKEN") != MASTER_AUTH_TOKEN:
+                if _ci(data, "AUTH_TOKEN") != MASTER_AUTH_TOKEN:
                     logger.warning(f"Auth failed for master at {addr}")
                     return {"MASTER": "ERROR", "MESSAGE": "AUTH_FAILED"}
 
@@ -395,30 +401,31 @@ class MasterServer:
 
         # Autenticação entre masters (opcional)
         if MASTER_AUTH_TOKEN:
-            if payload.get("AUTH_TOKEN") != MASTER_AUTH_TOKEN:
+            if _ci(payload, "AUTH_TOKEN") != MASTER_AUTH_TOKEN:
                 logger.warning(f"Auth failed for master at {addr}")
                 return build_master_envelope_spec("response_rejected", {"reason": "auth_failed"}, request_id=request_id)
 
         if mtype == "request_help":
-            current_load = int(payload.get("current_load") or 0)
-            capacity = int(payload.get("capacity") or CAPACITY)
-            workers_needed = int(payload.get("workers_needed") or 1)
-            available_workers = [worker for worker in self.task_manager.get_online_worker_snapshot() if worker.get("STATUS") != "offline"]
+            current_load = int(_ci(payload, "current_load") or 0)
+            capacity = int(_ci(payload, "capacity") or CAPACITY)
+            workers_needed = int(_ci(payload, "workers_needed") or 1)
+            available_workers = [worker for worker in self.task_manager.get_online_worker_snapshot() if str(_ci(worker, "STATUS") or "").lower() != "offline"]
 
             logger.info(
-                f"Master request from {payload.get('master_id')}: requested={workers_needed}, load={current_load}, available={len(available_workers)}"
+                f"Master request from {_ci(payload, 'master_id')}: requested={workers_needed}, load={current_load}, available={len(available_workers)}"
             )
 
             worker_details = []
             for worker in available_workers[:workers_needed]:
-                address = worker.get("HOST") or worker.get("SERVER_UUID") or self.server_uuid
-                worker_details.append({"id": worker.get("WORKER_UUID"), "address": address})
+                address = _ci(worker, "HOST") or _ci(worker, "SERVER_UUID") or self.server_uuid
+                worker_details.append({"id": _ci(worker, "WORKER_UUID"), "address": address})
 
             # If we are accepting, proactively send `command_redirect` to the chosen local workers
             # so they reconnect to the requesting master (PDF Sprint 3 flow).
             try:
-                requester_host = payload.get("master_host") or None
-                requester_port = int(payload.get("master_port")) if payload.get("master_port") else None
+                requester_host = _ci(payload, "master_host") or None
+                requester_port_value = _ci(payload, "master_port")
+                requester_port = int(requester_port_value) if requester_port_value else None
             except Exception:
                 requester_host = None
                 requester_port = None
@@ -450,7 +457,7 @@ class MasterServer:
             )
 
         if mtype == "notify_worker_returned":
-            worker_id = payload.get("worker_id")
+            worker_id = _ci(payload, "worker_id")
             if worker_id:
                 worker = self.task_manager.get_worker(worker_id)
                 if worker:
@@ -459,7 +466,7 @@ class MasterServer:
             return build_master_envelope_spec("response_accepted", {"worker_id": worker_id}, request_id=request_id)
 
         if mtype == "request_state":
-            target_server = payload.get("target_server")
+            target_server = _ci(payload, "target_server")
             if not target_server:
                 return build_master_envelope_spec("response_rejected", {"reason": "target_server_missing"}, request_id=request_id)
 
@@ -619,9 +626,13 @@ class MasterServer:
                 logger.info(f"[{addr}] Recebido: {data.get('WORKER', data.get('STATUS', 'UNKNOWN'))}")
                 
                 # Determinar tipo de mensagem e processar
-                if data.get("WORKER") == "ALIVE":
+                message_worker = str(_ci(data, "WORKER") or "").upper()
+                message_type = str(_ci(data, "type") or "").lower()
+                message_status = str(_ci(data, "STATUS") or "").upper()
+
+                if message_worker == "ALIVE":
                     # Pode ser apresenta├º├úo ou solicita├º├úo de tarefa
-                    worker_uuid = data.get("WORKER_UUID")
+                    worker_uuid = _ci(data, "WORKER_UUID")
                     
                     # Verificar se ├® primeira vez (apresenta├º├úo) ou solicita├º├úo de tarefa
                     worker = self.task_manager.get_worker(worker_uuid) if worker_uuid else None
@@ -633,15 +644,15 @@ class MasterServer:
                         # Worker conhecido, ├® solicita├º├úo de tarefa
                         response = self.handle_request_task(data, addr)
 
-                elif data.get("type") == "register_temporary_worker":
+                elif message_type == "register_temporary_worker":
                     response = self.handle_temporary_worker_registration(data, addr)
                 
-                elif data.get("STATUS") in ["OK", "NOK"]:
+                elif message_status in ["OK", "NOK"]:
                     # Reporte de resultado
                     response = self.handle_task_result(data, addr)
-                    worker_uuid = data.get("WORKER_UUID")
+                    worker_uuid = _ci(data, "WORKER_UUID")
 
-                elif data.get("MASTER"):
+                elif _ci(data, "MASTER") or message_type in {"request_help", "response_accepted", "response_rejected", "command_redirect", "register_temporary_worker", "command_release", "notify_worker_returned", "request_state"}:
                     # Mensagem vinda de outro Master
                     response = self.handle_master_request(data, addr)
                 

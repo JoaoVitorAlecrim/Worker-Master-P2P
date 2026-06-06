@@ -15,7 +15,7 @@ import json
 from common.election import build_election_message_spec, parse_election_message_spec, compute_winner
 from typing import Optional
 import uuid
-from common.protocol import send_json, recv_json_line, build_master_envelope_spec, parse_master_envelope_spec
+from common.protocol import send_json, recv_json_line, build_master_envelope_spec, parse_master_envelope_spec, get_ci_value
 from common.tasks import execute_task
 
 # Configuração
@@ -36,6 +36,10 @@ logging.basicConfig(
     format='[%(asctime)s] [WORKER] %(levelname)s: %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+
+def _ci(data: dict, key: str, default=None):
+    return get_ci_value(data, key, default)
 
 # --- Eleição UDP (listener compartilhado) -------------------------------------------
 _ELECTION_PORT = int(os.getenv("ELECTION_PORT", "54000"))
@@ -249,7 +253,7 @@ class WorkerClient:
             send_json(sock, message)
             response = recv_json_line(sock_file)
 
-            if response and response.get("type") == "response_accepted":
+            if response and str(_ci(response, "type") or "").lower() == "response_accepted":
                 logger.info("✓ Worker temporário registrado no novo master")
                 return True
 
@@ -270,7 +274,7 @@ class WorkerClient:
 
             self.announce_election_leader(response)
 
-            if response.get("TASK") in {"HEARTBEAT", "NO_TASK", "REDIRECT"}:
+            if str(_ci(response, "TASK") or "").upper() in {"HEARTBEAT", "NO_TASK", "REDIRECT"}:
                 self.update_peer_registry(response)
                 logger.info("✓ Conectado ao Master")
                 return True
@@ -632,7 +636,8 @@ class WorkerClient:
 
             self.announce_election_leader(response)
             
-            task_type = response.get("TASK")
+            task_type = str(_ci(response, "TASK") or "").upper()
+            response_type = str(_ci(response, "type") or "").lower()
             
             if task_type == "NO_TASK":
                 self.update_peer_registry(response)
@@ -644,7 +649,7 @@ class WorkerClient:
                 return None
             
             elif task_type == "QUERY":
-                user = response.get("USER")
+                user = _ci(response, "USER")
 
                 if user is not None:
                     self.update_peer_registry(response)
@@ -657,18 +662,18 @@ class WorkerClient:
                 logger.error(f"Tarefa incompleta: {response}")
                 return None
             
-            elif response.get("TASK") == "ERROR":
-                logger.error(f"Erro do Master: {response.get('MESSAGE')}")
+            elif task_type == "ERROR":
+                logger.error(f"Erro do Master: {_ci(response, 'MESSAGE')}")
                 return None
 
-            elif response.get("TASK") == "REDIRECT":
+            elif task_type == "REDIRECT":
                 self.update_peer_registry(response)
                 return self.handle_redirect(response)
 
-            elif response.get("type") == "command_redirect":
+            elif response_type == "command_redirect":
                 return self.handle_redirect(response)
 
-            elif response.get("TASK") == "RELEASE" or response.get("type") == "command_release":
+            elif task_type == "RELEASE" or response_type == "command_release":
                 self.update_peer_registry(response)
                 return self.handle_release(response)
             
@@ -682,11 +687,11 @@ class WorkerClient:
 
     def handle_redirect(self, message: dict) -> dict:
         """Aplica um comando de redirecionamento para outro master."""
-        payload = message.get("payload") if isinstance(message.get("payload"), dict) else message
+        payload = _ci(message, "payload") if isinstance(_ci(message, "payload"), dict) else message
 
-        new_address = payload.get("new_master_address")
-        target_host = payload.get("TARGET_HOST")
-        target_port = payload.get("TARGET_PORT")
+        new_address = _ci(payload, "new_master_address")
+        target_host = _ci(payload, "TARGET_HOST")
+        target_port = _ci(payload, "TARGET_PORT")
 
         if new_address and not (target_host and target_port):
             try:
@@ -715,13 +720,13 @@ class WorkerClient:
 
     def handle_release(self, message: dict) -> dict:
         """Processa a devolução do worker ao master original."""
-        payload = message.get("payload") if isinstance(message.get("payload"), dict) else message
+        payload = _ci(message, "payload") if isinstance(_ci(message, "payload"), dict) else message
 
         self.notify_worker_returned()
 
-        target_host = payload.get("TARGET_HOST") or self.original_master_host
-        target_port = payload.get("TARGET_PORT") or self.original_master_port
-        target_server = payload.get("TARGET_SERVER_UUID") or self.original_server_uuid
+        target_host = _ci(payload, "TARGET_HOST") or self.original_master_host
+        target_port = _ci(payload, "TARGET_PORT") or self.original_master_port
+        target_server = _ci(payload, "TARGET_SERVER_UUID") or self.original_server_uuid
 
         self.master_host = target_host
         self.master_port = int(target_port)
@@ -837,7 +842,7 @@ class WorkerClient:
         try:
             response = recv_json_line(sock_file)
             
-            if response and response.get("STATUS") == "ACK":
+            if response and str(_ci(response, "STATUS") or "").upper() == "ACK":
                 self.announce_election_leader(response)
                 return True
             
