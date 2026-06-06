@@ -86,6 +86,56 @@ Ver [docs/TESTE_GUIDE.md](docs/TESTE_GUIDE.md) para mais detalhes.
 
 ---
 
+## 🔌 Uso da mesma porta (`MASTER_PORT`)
+
+Existem várias formas seguras de operar dois ou mais `Master` usando o mesmo número de porta. Resumo rápido:
+
+- **Máquinas diferentes (hosts distintos):** cada host tem sua própria pilha TCP/IP — portanto, Masters em hosts diferentes podem usar a mesma `MASTER_PORT` sem conflito.
+- **Mesmo host, IPs diferentes:** se a máquina tem múltiplos endereços IP locais, cada processo pode dar `bind` em um IP distinto com a mesma porta.
+- **Mesmo host, portas distintas:** a solução mais simples para testes locais é usar portas diferentes (ex.: `5100` e `5101`).
+- **Containers / Namespaces de rede:** executar cada Master em um container (Docker) ou namespace separa as pilhas de rede e permite reutilizar a mesma porta por container.
+- **Proxy / Multiplexer:** colocar um proxy na porta única e rotear para Masters distintos por hostname/URI — útil para produção.
+- **SO_REUSEPORT / balanceamento:** existe `SO_REUSEPORT` em Linux para distribuição de conexões entre processos, mas não é uma solução portátil (não funciona igual no Windows) e não é recomendada aqui.
+
+Exemplos práticos (copiáveis):
+
+1) Dois Masters em hosts distintos (mesma porta `5100`):
+
+```bash
+# No Host A
+MASTER_PORT=5100 SERVER_UUID=Master_A python master.py
+
+# No Host B (outro host - mesma porta ok)
+MASTER_PORT=5100 SERVER_UUID=Master_B python master.py
+```
+
+2) Dois Masters na mesma máquina (usar portas diferentes):
+
+```bash
+# Terminal 1
+MASTER_PORT=5100 SERVER_UUID=Master_A python master.py
+
+# Terminal 2
+MASTER_PORT=5101 SERVER_UUID=Master_B python master.py
+```
+
+3) Rodando Masters em containers (mesma porta por container):
+
+```bash
+# build e rodar container para Master A
+docker build -t master-a .
+docker run -e MASTER_PORT=5100 -e SERVER_UUID=Master_A master-a
+
+# container para Master B
+docker build -t master-b .
+docker run -e MASTER_PORT=5100 -e SERVER_UUID=Master_B master-b
+```
+
+Observações rápidas:
+- Workers fazem conexões de saída para `master_host:master_port` — muitos workers podem conectar ao mesmo `MASTER_PORT` sem problema.
+- No Windows não conte com `SO_REUSEPORT` para compartilhar escuta de TCP entre processos; prefira portas distintas ou containers.
+
+
 ## 📁 Estrutura
 
 ```
