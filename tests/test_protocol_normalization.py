@@ -23,6 +23,9 @@ class TestProtocolNormalization(unittest.TestCase):
 
     def test_master_handles_mixed_case_request_help_envelope(self):
         master = MasterServer(server_uuid="Master_A")
+        # Precisa de um worker ocioso disponível para que o pedido seja aceito
+        # (quem responde a request_help empresta seus próprios workers ociosos).
+        master.task_manager.register_worker("Worker_local", "Master_A", host="127.0.0.1")
 
         response = master.handle_master_request(
             {
@@ -30,6 +33,8 @@ class TestProtocolNormalization(unittest.TestCase):
                 "REQUEST_ID": "RID-202",
                 "PAYLOAD": {
                     "MASTER_ID": "Master_B",
+                    "MASTER_HOST": "127.0.0.1",
+                    "MASTER_PORT": 5101,
                     "CURRENT_LOAD": 150,
                     "CAPACITY": 100,
                     "WORKERS_NEEDED": 2,
@@ -40,6 +45,7 @@ class TestProtocolNormalization(unittest.TestCase):
 
         self.assertEqual(response["type"], "response_accepted")
         self.assertEqual(response["request_id"], "RID-202")
+        self.assertEqual(response["payload"]["worker_details"][0]["id"], "Worker_local")
 
     def test_worker_handles_mixed_case_redirect_payload(self):
         worker = WorkerClient(worker_uuid="Worker_1", server_uuid="Master_A")

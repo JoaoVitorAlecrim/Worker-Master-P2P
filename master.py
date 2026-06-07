@@ -46,6 +46,12 @@ if peers_env:
         except Exception:
             logger.warning(f"MASTER_PEERS inválido: {part}")
 
+# Endereço (ip:porta) de cada Master vizinho, indexado por master_id — conforme o PDF
+# ("Cada Master deve possuir... endereço de socket (ip:porta) conhecido pelos Masters
+# vizinhos"), o request_help do exemplo do PDF NÃO inclui host/porta do solicitante;
+# quem responde já deve conhecer o endereço de seus vizinhos a partir de MASTER_PEERS.
+PEER_ADDRESS_BY_ID = {peer_uuid: (peer_host, peer_port) for peer_host, peer_port, peer_uuid in PEER_MASTERS}
+
 # Logging
 logging.basicConfig(
     level=logging.INFO,
@@ -227,37 +233,10 @@ class MasterServer:
 
         if not task_id:
             logger.debug(f"Nenhuma tarefa para {worker_uuid}")
-            # Evita flood: só pedir ajuda a peers se passou o cooldown desde a última tentativa
-            now = time.time()
-            if PEER_MASTERS and (now - self._last_help_request_at) >= HELP_REQUEST_COOLDOWN:
-                self._last_help_request_at = now
-                # Tentar pedir ajuda a peers configurados
-                for peer in PEER_MASTERS:
-                    try:
-                        peer_host, peer_port, peer_uuid = peer
-                    except Exception:
-                        continue
-
-                    resp = self.request_help_to_peer(peer_host, peer_port, requested=1)
-
-                    # Accept both legacy and PDF envelope responses.
-                    try:
-                        # PDF-style normalized response
-                        if resp and resp.get("type") == "response_accepted":
-                            payload = resp.get("payload") or {}
-                            offered = int(payload.get("workers_offered") or 0)
-                            if offered > 0:
-                                logger.info(f"Peer {peer_uuid} accepted help (offered={offered}). Peer will redirect its workers.")
-                                # Per PDF, the peer will issue command_redirect to its workers; we do not redirect our own workers.
-                                return self._attach_election_info({"TASK": "NO_TASK"})
-
-                        # Legacy support: older peers may return RESPONSE_HELP / ACCEPT
-                        if resp and resp.get("MASTER") == "RESPONSE_HELP" and resp.get("ACCEPT"):
-                            logger.info(f"Peer {peer_uuid} (legacy) accepted help.")
-                            return self._attach_election_info({"TASK": "NO_TASK"})
-                    except Exception:
-                        pass
-
+            # Per o protocolo (PDF Sprint 3), pedir ajuda a peers é responsabilidade do
+            # master quando ele está SATURADO (ver `_check_saturation_and_request_help`,
+            # disparado pelo `worker_monitor_thread`) — não quando está ocioso. Um master
+            # sem tarefas simplesmente informa NO_TASK ao worker.
             return self._attach_election_info({"TASK": "NO_TASK"})
         
         # Atribuir tarefa ao worker
@@ -406,49 +385,79 @@ class MasterServer:
                 return build_master_envelope_spec("response_rejected", {"reason": "auth_failed"}, request_id=request_id)
 
         if mtype == "request_help":
-            current_load = int(_ci(payload, "current_load") or 0)
-            capacity = int(_ci(payload, "capacity") or CAPACITY)
+            requester_master_id = _ci(payload, "master_id")
             workers_needed = int(_ci(payload, "workers_needed") or 1)
-            available_workers = [worker for worker in self.task_manager.get_online_worker_snapshot() if str(_ci(worker, "STATUS") or "").lower() != "offline"]
+
+            # O exemplo de request_help do PDF traz apenas master_id/current_load/
+            # capacity/workers_needed — sem host/porta do solicitante. O endereço dos
+            # Masters vizinhos já deve ser conhecido de antemão (MASTER_PEERS), então
+            # resolvemos por master_id primeiro. master_host/master_port no payload
+            # (campo extra, não previsto no PDF) servem apenas como fallback.
+            requester_host, requester_port = PEER_ADDRESS_BY_ID.get(requester_master_id, (None, None))
+
+            if not (requester_host and requester_port):
+                requester_host = requester_host or _ci(payload, "master_host")
+                requester_port_value = _ci(payload, "master_port")
+                try:
+                    requester_port = requester_port or (int(requester_port_value) if requester_port_value else None)
+                except Exception:
+                    pass
+
+            stats = self.task_manager.get_statistics()
+            current_load = stats["tasks"]["pending"] + stats["tasks"]["in_progress"]
+            # "capacity" no PDF é o próprio threshold de saturação (current_load > capacity).
+            # Usamos a mesma definição para decidir se TAMBÉM estamos saturados e não
+            # podemos emprestar (reason="high_load").
+            saturation_threshold = CAPACITY
+
+            # Só podemos emprestar workers locais (não temporários) que estejam ociosos
+            # (sem tarefa atribuída no momento) — emprestar um worker ocupado interromperia
+            # uma tarefa em andamento, e reemprestar um worker já emprestado criaria cadeias.
+            idle_workers = [
+                worker for worker in self.task_manager.get_all_workers()
+                if worker.is_alive(HEARTBEAT_TIMEOUT)
+                and worker.status != WorkerStatus.OFFLINE
+                and not worker.is_temporary
+                and worker.current_task_id is None
+            ]
+
+            if current_load > saturation_threshold or not idle_workers:
+                reason = "high_load" if current_load > saturation_threshold else "no_workers_available"
+                logger.info(
+                    f"Recusando ajuda a {requester_master_id}: reason={reason} "
+                    f"(local_load={current_load}, idle_workers={len(idle_workers)})"
+                )
+                return build_master_envelope_spec(
+                    "response_rejected",
+                    {"reason": reason},
+                    request_id=request_id,
+                )
+
+            chosen = idle_workers[:workers_needed]
+            worker_details = []
+            for worker in chosen:
+                worker_details.append({"id": worker.worker_uuid, "address": worker.host or self.server_uuid})
+
+                if requester_host and requester_port:
+                    conn = None
+                    with self.lock:
+                        conn = self.worker_connections.get(worker.worker_uuid)
+                    if conn:
+                        envelope = build_master_envelope_spec(
+                            "command_redirect",
+                            {"new_master_address": f"{requester_host}:{requester_port}"},
+                            request_id=str(uuid.uuid4()),
+                        )
+                        try:
+                            send_json(conn, envelope)
+                            logger.info(f"↪ command_redirect enviado a {worker.worker_uuid} -> {requester_host}:{requester_port}")
+                        except Exception:
+                            logger.warning(f"Falha ao enviar command_redirect para worker {worker.worker_uuid}")
 
             logger.info(
-                f"Master request from {_ci(payload, 'master_id')}: requested={workers_needed}, load={current_load}, available={len(available_workers)}"
+                f"Master request from {requester_master_id}: requested={workers_needed}, "
+                f"local_load={current_load}, lending={len(worker_details)}"
             )
-
-            worker_details = []
-            for worker in available_workers[:workers_needed]:
-                address = _ci(worker, "HOST") or _ci(worker, "SERVER_UUID") or self.server_uuid
-                worker_details.append({"id": _ci(worker, "WORKER_UUID"), "address": address})
-
-            # If we are accepting, proactively send `command_redirect` to the chosen local workers
-            # so they reconnect to the requesting master (PDF Sprint 3 flow).
-            try:
-                requester_host = _ci(payload, "master_host") or None
-                requester_port_value = _ci(payload, "master_port")
-                requester_port = int(requester_port_value) if requester_port_value else None
-            except Exception:
-                requester_host = None
-                requester_port = None
-
-            if requester_host and requester_port:
-                for wd in worker_details:
-                    wid = wd.get("id")
-                    conn = None
-                    try:
-                        with self.lock:
-                            conn = self.worker_connections.get(wid)
-                        if conn:
-                            envelope = build_master_envelope_spec(
-                                "command_redirect",
-                                {"new_master_address": f"{requester_host}:{requester_port}"},
-                                request_id=str(uuid.uuid4()),
-                            )
-                            try:
-                                send_json(conn, envelope)
-                            except Exception:
-                                logger.warning(f"Falha ao enviar command_redirect para worker {wid}")
-                    except Exception:
-                        continue
 
             return build_master_envelope_spec(
                 "response_accepted",
@@ -498,10 +507,13 @@ class MasterServer:
         """Envia uma solicitação de ajuda (REQUEST_HELP) a um peer master e devolve a resposta."""
         request_id = str(uuid.uuid4())
         stats = self.task_manager.get_statistics()
+        # Payload conforme o exemplo literal do PDF (request_help): apenas master_id,
+        # current_load, capacity e workers_needed — sem host/porta do solicitante.
+        # O endereço dos vizinhos já deve ser conhecido de antemão (ver MASTER_PEERS /
+        # PEER_ADDRESS_BY_ID), evitando depender de campos extras (ex.: HOST="0.0.0.0")
+        # que outra implementação pode nem reconhecer.
         payload = {
             "master_id": self.server_uuid,
-            "master_host": HOST,
-            "master_port": PORT,
             "current_load": stats["tasks"]["pending"] + stats["tasks"]["in_progress"],
             "capacity": CAPACITY,
             "workers_needed": requested,
@@ -720,7 +732,52 @@ class MasterServer:
             pass
     
     # ============ MONITORAMENTO ============
-    
+
+    def _check_saturation_and_request_help(self, stats: dict) -> None:
+        """Detecta saturação (current_load > capacity) e solicita Workers emprestados a peers.
+
+        Conforme o PDF (Sprint 3, Tarefa 02): "capacity" É o threshold de saturação
+        (ex.: capacity = 100) e o disparo ocorre quando current_load > capacity. É o
+        master SATURADO quem envia `request_help` — diferente do master ocioso, que
+        apenas responde NO_TASK aos seus workers.
+        """
+        if not PEER_MASTERS:
+            return
+
+        current_load = stats["tasks"]["pending"] + stats["tasks"]["in_progress"]
+
+        if current_load <= CAPACITY:
+            return
+
+        now = time.time()
+        if (now - self._last_help_request_at) < HELP_REQUEST_COOLDOWN:
+            return
+        self._last_help_request_at = now
+
+        excess = current_load - CAPACITY
+        workers_needed = max(1, (excess + 9) // 10)  # ~1 worker emprestado a cada 10 tarefas excedentes
+
+        logger.info(f"⚠ Saturado (load={current_load} > capacity={CAPACITY}). Solicitando {workers_needed} worker(s) a peers...")
+
+        for peer in PEER_MASTERS:
+            try:
+                peer_host, peer_port, peer_uuid = peer
+            except Exception:
+                continue
+
+            resp = self.request_help_to_peer(peer_host, peer_port, requested=workers_needed)
+            payload = (resp or {}).get("payload") or {}
+
+            if resp and resp.get("type") == "response_accepted":
+                offered = int(payload.get("workers_offered") or 0)
+                if offered > 0:
+                    logger.info(f"✓ Peer {peer_uuid} emprestará {offered} worker(s); aguardando register_temporary_worker.")
+                    return
+            elif resp and resp.get("type") == "response_rejected":
+                logger.info(f"Peer {peer_uuid} recusou ajuda: reason={payload.get('reason')}")
+            else:
+                logger.warning(f"Sem resposta válida do peer {peer_uuid} para request_help.")
+
     def worker_monitor_thread(self) -> None:
         """Thread que monitora saúde de workers e detecta falhas."""
         logger.info("Worker monitor iniciado")
@@ -749,7 +806,14 @@ class MasterServer:
                     f"Completed: {stats['tasks']['completed']}, "
                     f"Workers: {stats['workers']['online']}/{stats['workers']['total']}"
                 )
-                # Check for potential release of borrowed workers when load normalizes
+                # Saturado? Pedir ajuda a peers (PDF Sprint 3: request_help é responsabilidade
+                # do master saturado, não do master ocioso).
+                self._check_saturation_and_request_help(stats)
+
+                # Check for potential release of borrowed workers when load normalizes.
+                # PDF (Sprint 3, Tarefa 02 / Nota 35): o threshold de liberação deve ser
+                # MENOR que o de saturação (capacity) para gerar histerese e evitar o
+                # efeito ping-pong de empréstimo/devolução imediatos (ex.: 60% da capacidade).
                 try:
                     current_load = stats['tasks']['pending'] + stats['tasks']['in_progress']
                     release_threshold = int(CAPACITY * 0.6)

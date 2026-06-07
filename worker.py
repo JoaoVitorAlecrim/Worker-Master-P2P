@@ -722,8 +722,6 @@ class WorkerClient:
         """Processa a devolução do worker ao master original."""
         payload = _ci(message, "payload") if isinstance(_ci(message, "payload"), dict) else message
 
-        self.notify_worker_returned()
-
         target_host = _ci(payload, "TARGET_HOST") or self.original_master_host
         target_port = _ci(payload, "TARGET_PORT") or self.original_master_port
         target_server = _ci(payload, "TARGET_SERVER_UUID") or self.original_server_uuid
@@ -744,35 +742,6 @@ class WorkerClient:
             }
         }
 
-    def notify_worker_returned(self) -> bool:
-        """Notifica o master atual de que o worker voltou ao master original."""
-        request_id = str(uuid.uuid4())
-        envelope = build_master_envelope_spec(
-            "notify_worker_returned",
-            {
-                "worker_id": self.worker_uuid,
-                "original_server_uuid": self.original_server_uuid,
-            },
-            request_id=request_id,
-        )
-
-        try:
-            sock = socket.create_connection((self.master_host, self.master_port), timeout=5)
-            try:
-                sock.settimeout(5)
-                sock_file = sock.makefile("r", encoding="utf-8")
-                send_json(sock, envelope)
-                recv_json_line(sock_file)
-                return True
-            finally:
-                try:
-                    sock.close()
-                except Exception:
-                    pass
-        except Exception as exc:
-            logger.warning(f"Falha ao notificar retorno do worker: {exc}")
-            return False
-    
     def execute_and_report(self, sock: socket.socket, sock_file, task: dict) -> bool:
         """
         Executa tarefa e reporta resultado.
