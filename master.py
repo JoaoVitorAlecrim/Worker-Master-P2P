@@ -77,7 +77,12 @@ class MasterServer:
         self._worker_last_request: Dict[str, float] = {}
         WORKER_POLL_COOLDOWN = float(os.getenv("WORKER_POLL_COOLDOWN", "1"))
         self._worker_poll_cooldown = WORKER_POLL_COOLDOWN
-    
+        # Sprint 4: rastreamento para o monitor de métricas
+        self.lent_workers: Dict[str, str] = {}   # worker_uuid -> peer_uuid (direction "out")
+        self._peer_last_seen: Dict[str, float] = {}  # peer_uuid -> timestamp último ping/contato
+        self.peer_masters = PEER_MASTERS          # acessível pelo common/monitor.py
+        self._capacity = CAPACITY                 # acessível pelo common/monitor.py
+
     # ============ INICIALIZAÇÃO ============
     
     def load_initial_tasks(self, num_tasks: int = 60) -> None:
@@ -451,6 +456,8 @@ class MasterServer:
                         try:
                             send_json(conn, envelope)
                             logger.info(f"↪ command_redirect enviado a {worker.worker_uuid} -> {requester_host}:{requester_port}")
+                            with self.lock:
+                                self.lent_workers[worker.worker_uuid] = requester_master_id
                         except Exception:
                             logger.warning(f"Falha ao enviar command_redirect para worker {worker.worker_uuid}")
 
@@ -472,6 +479,8 @@ class MasterServer:
                 if worker:
                     worker.server_uuid = self.server_uuid
                     worker.mark_online()
+                with self.lock:
+                    self.lent_workers.pop(worker_id, None)
             return build_master_envelope_spec("response_accepted", {"worker_id": worker_id}, request_id=request_id)
 
         if mtype == "request_state":
@@ -499,6 +508,9 @@ class MasterServer:
             except Exception as exc:
                 logger.warning(f"Erro ao fornecer estado para {addr}: {exc}")
                 return build_master_envelope_spec("response_rejected", {"reason": str(exc)}, request_id=request_id)
+
+        if mtype == "ping":
+            return build_master_envelope_spec("pong", {}, request_id=request_id)
 
         logger.warning(f"Mensagem MASTER desconhecida de {addr}: {data}")
         return build_master_envelope_spec("response_rejected", {"reason": "unsupported_message"}, request_id=request_id)
