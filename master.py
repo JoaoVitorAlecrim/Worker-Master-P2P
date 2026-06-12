@@ -881,13 +881,18 @@ class MasterServer:
                 if num_tasks > 0:
                     self.load_initial_tasks(num_tasks)
             
-            # Iniciar thread de monitoramento
+            # Iniciar thread de monitoramento de workers
             monitor_thread = threading.Thread(
                 target=self.worker_monitor_thread,
                 daemon=True
             )
             monitor_thread.start()
-            
+
+            # Sprint 4: envio de métricas ao supervisor e ping M2M
+            from common.monitor import start_monitor_thread, start_peer_ping_thread
+            start_monitor_thread(self)
+            start_peer_ping_thread(self)
+
             # Aceitar conexões
             while self.running:
                 try:
