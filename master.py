@@ -19,7 +19,7 @@ import os
 # Configuração (podem ser sobrescritas via env para testes)
 HOST = os.getenv("MASTER_HOST", "0.0.0.0")
 PORT = int(os.getenv("MASTER_PORT", "5000"))
-SERVER_UUID = os.getenv("SERVER_UUID", "Master_A")
+SERVER_UUID = os.getenv("SERVER_UUID", "MASTER_2")
 MASTER_AUTH_TOKEN = os.getenv("MASTER_AUTH_TOKEN")
 SOCKET_TIMEOUT = 15
 HEARTBEAT_TIMEOUT = 15  # Segundos até considerar worker offline
@@ -300,16 +300,16 @@ class MasterServer:
 
         if not worker_uuid or not status or not task_name:
             logger.warning(f"Reporte incompleto de {worker_uuid}")
-            return {"STATUS": "ACK"}
+            return {"STATUS": "ACK", "WORKER_UUID": worker_uuid or ""}
 
         if not task_id:
             logger.warning(f"Tarefa associada a {worker_uuid} não encontrada")
-            return {"STATUS": "ACK"}
+            return {"STATUS": "ACK", "WORKER_UUID": worker_uuid}
 
         task = self.task_manager.get_task(task_id)
         if not task:
             logger.warning(f"Tarefa {task_id} não encontrada")
-            return {"STATUS": "ACK"}
+            return {"STATUS": "ACK", "WORKER_UUID": worker_uuid}
 
         if status == "OK":
             self.task_manager.complete_task(task_id, None)
@@ -317,9 +317,8 @@ class MasterServer:
         else:
             self.task_manager.fail_task(task_id, "Worker reported NOK")
             logger.warning(f"✗ {task_id[:8]} falhou")
-        
-        # Responder com ACK estrito conforme o PDF.
-        return {"STATUS": "ACK"}
+
+        return {"STATUS": "ACK", "WORKER_UUID": worker_uuid}
 
     # ============ PROTOCOLO - MASTER-TO-MASTER ============
 
@@ -401,12 +400,24 @@ class MasterServer:
             requester_host, requester_port = PEER_ADDRESS_BY_ID.get(requester_master_id, (None, None))
 
             if not (requester_host and requester_port):
-                requester_host = requester_host or _ci(payload, "master_host")
-                requester_port_value = _ci(payload, "master_port")
-                try:
-                    requester_port = requester_port or (int(requester_port_value) if requester_port_value else None)
-                except Exception:
-                    pass
+                # Alguns grupos mandam "master_address": "host:port" (campo extra não previsto
+                # no PDF). Tentamos parsear antes de olhar master_host/master_port separados.
+                master_address_field = _ci(payload, "master_address")
+                if master_address_field:
+                    try:
+                        _h, _p = str(master_address_field).rsplit(":", 1)
+                        requester_host = requester_host or _h
+                        requester_port = requester_port or int(_p)
+                    except Exception:
+                        pass
+                if not requester_host:
+                    requester_host = _ci(payload, "master_host")
+                if not requester_port:
+                    requester_port_value = _ci(payload, "master_port")
+                    try:
+                        requester_port = int(requester_port_value) if requester_port_value else None
+                    except Exception:
+                        pass
 
             stats = self.task_manager.get_statistics()
             current_load = stats["tasks"]["pending"] + stats["tasks"]["in_progress"]
@@ -676,8 +687,9 @@ class MasterServer:
                     response = self.handle_task_result(data, addr)
                     worker_uuid = _ci(data, "WORKER_UUID")
 
-                elif _ci(data, "MASTER") or message_type in {"request_help", "response_accepted", "response_rejected", "command_redirect", "register_temporary_worker", "command_release", "notify_worker_returned", "request_state"}:
-                    # Mensagem vinda de outro Master
+                elif _ci(data, "MASTER") or (message_type and "payload" in data):
+                    # Mensagem vinda de outro Master: qualquer envelope {type, payload}
+                    # incluindo tipos desconhecidos que o spec manda logar e ignorar
                     response = self.handle_master_request(data, addr)
                 
                 else:

@@ -251,14 +251,26 @@ class WorkerClient:
                 message["AUTH_TOKEN"] = self.auth_token
 
             send_json(sock, message)
-            response = recv_json_line(sock_file)
 
-            if response and str(_ci(response, "type") or "").lower() == "response_accepted":
-                logger.info("✓ Worker temporário registrado no novo master")
-                return True
+            # Outros grupos podem não enviar resposta a register_temporary_worker.
+            # Usamos timeout curto: se não chegar nada em 3s, assumimos sucesso.
+            try:
+                sock.settimeout(3.0)
+                response = recv_json_line(sock_file)
+            except (socket.timeout, OSError):
+                response = None
+            finally:
+                sock.settimeout(SOCKET_TIMEOUT)
 
-            logger.warning(f"Registro temporário rejeitado: {response}")
-            return False
+            if response is not None:
+                resp_type = str(_ci(response, "type") or "").lower()
+                if resp_type == "response_rejected":
+                    reason = _ci(_ci(response, "payload") or {}, "reason") or "unknown"
+                    logger.warning(f"Registro temporário rejeitado pelo master: {reason}")
+                    return False
+
+            logger.info("✓ Worker temporário registrado no novo master")
+            return True
         except Exception as exc:
             logger.error(f"Erro ao registrar worker temporário: {exc}")
             return False
@@ -722,8 +734,19 @@ class WorkerClient:
         """Processa a devolução do worker ao master original."""
         payload = _ci(message, "payload") if isinstance(_ci(message, "payload"), dict) else message
 
-        target_host = _ci(payload, "TARGET_HOST") or self.original_master_host
-        target_port = _ci(payload, "TARGET_PORT") or self.original_master_port
+        # Spec (PDF pág. 11): command_release envia "original_master_address": "host:port"
+        original_addr = _ci(payload, "original_master_address")
+        if original_addr:
+            try:
+                target_host, port_str = str(original_addr).rsplit(":", 1)
+                target_port = int(port_str)
+            except Exception:
+                target_host = self.original_master_host
+                target_port = self.original_master_port
+        else:
+            target_host = _ci(payload, "TARGET_HOST") or self.original_master_host
+            target_port = _ci(payload, "TARGET_PORT") or self.original_master_port
+
         target_server = _ci(payload, "TARGET_SERVER_UUID") or self.original_server_uuid
 
         self.master_host = target_host

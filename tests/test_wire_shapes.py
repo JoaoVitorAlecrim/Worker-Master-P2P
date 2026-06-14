@@ -79,7 +79,8 @@ class TestWireShapes(unittest.TestCase):
             ("127.0.0.1", 12345),
         )
 
-        self.assertEqual(resp, {"STATUS": "ACK"})
+        self.assertEqual(resp.get("STATUS"), "ACK")
+        self.assertEqual(resp.get("WORKER_UUID"), "W-1")
         self.assertEqual(ms.task_manager.get_task(task.task_id).status.value, "completed")
 
 

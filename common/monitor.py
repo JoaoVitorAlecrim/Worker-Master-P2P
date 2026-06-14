@@ -2,6 +2,7 @@
 import datetime
 import json
 import logging
+import os
 import socket
 import ssl
 import threading
@@ -33,11 +34,12 @@ def collect_system_metrics() -> dict:
             "disk": {"total_gb": 0.0, "free_gb": 0.0, "percent_used": 0.0},
         }
 
-    cpu_pct = psutil.cpu_percent(interval=0.1)
+    cpu_pct = psutil.cpu_percent(interval=None)
     cpu_logical = psutil.cpu_count(logical=True) or 1
     cpu_physical = psutil.cpu_count(logical=False) or 1
     mem = psutil.virtual_memory()
-    disk = psutil.disk_usage("/")
+    disk_path = "C:\\" if os.name == "nt" else "/"
+    disk = psutil.disk_usage(disk_path)
     uptime = int(time.time() - psutil.boot_time())
 
     try:
@@ -179,10 +181,20 @@ def build_performance_report(master) -> dict:
 
 def send_to_supervisor(payload: dict) -> None:
     """Envia o payload ao supervisor via TLS/TCP (fire-and-forget, sem recv)."""
-    ctx = ssl.create_default_context()
-    raw = socket.create_connection((SUPERVISOR_HOST, SUPERVISOR_PORT), timeout=5.0)
-    with ctx.wrap_socket(raw, server_hostname=SUPERVISOR_HOST) as tls:
-        tls.sendall((json.dumps(payload) + "\n").encode("utf-8"))
+    data = (json.dumps(payload) + "\n").encode("utf-8")
+    try:
+        ctx = ssl.create_default_context()
+        with socket.create_connection((SUPERVISOR_HOST, SUPERVISOR_PORT), timeout=5.0) as raw:
+            with ctx.wrap_socket(raw, server_hostname=SUPERVISOR_HOST) as tls:
+                tls.sendall(data)
+        return
+    except ssl.SSLError as exc:
+        logger.warning(f"[monitor] TLS verificado falhou ({exc}); tentando sem verificação.")
+    # Fallback: TLS sem verificação de certificado (ambiente de sala de aula).
+    ctx = ssl._create_unverified_context()
+    with socket.create_connection((SUPERVISOR_HOST, SUPERVISOR_PORT), timeout=5.0) as raw:
+        with ctx.wrap_socket(raw, server_hostname=SUPERVISOR_HOST) as tls:
+            tls.sendall(data)
 
 
 def _monitor_loop(master, interval: int) -> None:
