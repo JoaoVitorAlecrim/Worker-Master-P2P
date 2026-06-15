@@ -4,7 +4,6 @@ import json
 import logging
 import os
 import socket
-import ssl
 import threading
 import time
 import uuid
@@ -17,8 +16,8 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-SUPERVISOR_HOST = "nuted-ia.dev"
-SUPERVISOR_PORT = 443
+SUPERVISOR_HOST = os.getenv("SUPERVISOR_HOST", "10.62.217.45")
+SUPERVISOR_PORT = int(os.getenv("SUPERVISOR_PORT", "8000"))
 NEIGHBOR_STALE_SECONDS = 60
 
 
@@ -34,7 +33,7 @@ def collect_system_metrics() -> dict:
             "disk": {"total_gb": 0.0, "free_gb": 0.0, "percent_used": 0.0},
         }
 
-    cpu_pct = psutil.cpu_percent(interval=None)
+    cpu_pct = psutil.cpu_percent(interval=1)
     cpu_logical = psutil.cpu_count(logical=True) or 1
     cpu_physical = psutil.cpu_count(logical=False) or 1
     mem = psutil.virtual_memory()
@@ -180,21 +179,11 @@ def build_performance_report(master) -> dict:
 
 
 def send_to_supervisor(payload: dict) -> None:
-    """Envia o payload ao supervisor via TLS/TCP (fire-and-forget, sem recv)."""
+    """Envia o payload ao supervisor via TCP simples (TLS desabilitado)."""
     data = (json.dumps(payload) + "\n").encode("utf-8")
-    try:
-        ctx = ssl.create_default_context()
-        with socket.create_connection((SUPERVISOR_HOST, SUPERVISOR_PORT), timeout=5.0) as raw:
-            with ctx.wrap_socket(raw, server_hostname=SUPERVISOR_HOST) as tls:
-                tls.sendall(data)
-        return
-    except ssl.SSLError as exc:
-        logger.warning(f"[monitor] TLS verificado falhou ({exc}); tentando sem verificação.")
-    # Fallback: TLS sem verificação de certificado (ambiente de sala de aula).
-    ctx = ssl._create_unverified_context()
-    with socket.create_connection((SUPERVISOR_HOST, SUPERVISOR_PORT), timeout=5.0) as raw:
-        with ctx.wrap_socket(raw, server_hostname=SUPERVISOR_HOST) as tls:
-            tls.sendall(data)
+    print(f"Enviando métricas ao supervisor {SUPERVISOR_HOST}:{SUPERVISOR_PORT} (message_id={payload})")
+    with socket.create_connection((SUPERVISOR_HOST, SUPERVISOR_PORT), timeout=5.0) as sock:
+        sock.sendall(data)
 
 
 def _monitor_loop(master, interval: int) -> None:

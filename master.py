@@ -17,7 +17,7 @@ import uuid
 import os
 
 # Configuração (podem ser sobrescritas via env para testes)
-HOST = os.getenv("MASTER_HOST", "0.0.0.0")
+HOST = os.getenv("MASTER_HOST", "10.62.217.24")
 PORT = int(os.getenv("MASTER_PORT", "5000"))
 SERVER_UUID = os.getenv("SERVER_UUID", "MASTER_2")
 MASTER_AUTH_TOKEN = os.getenv("MASTER_AUTH_TOKEN")
@@ -37,7 +37,13 @@ def _ci(data: dict, key: str, default=None):
     from common.protocol import get_ci_value
 
     return get_ci_value(data, key, default)
-peers_env = os.getenv("MASTER_PEERS")
+_DEFAULT_PEERS = (
+    "10.62.217.31:10000:MASTER_1,"
+    "10.62.217.219:10000:MASTER_3,"
+    "10.62.217.216:10000:MASTER_4,"
+    "10.62.217.39:10000:MASTER_5"
+)
+peers_env = os.getenv("MASTER_PEERS", _DEFAULT_PEERS)
 if peers_env:
     for part in peers_env.split(','):
         try:
